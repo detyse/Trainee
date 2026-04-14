@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trainee</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}" />
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  </head>
+  <body data-selected-run="{{ selected_run.id if selected_run else '' }}">
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Agent Runtime / Agent Loop</p>
+          <h1>Trainee</h1>
+          <p class="lede">
+            Run external training projects through a single runtime loop: capture context, launch a round, observe
+            heartbeat, parse metrics, and decide the next CLI parameters.
+          </p>
+        </div>
+        <div class="hero-status">
+          <span class="status-pill status-{{ loop.status|replace('_', '-') }}">{{ loop.status }}</span>
+          <p>{{ loop.message or "No active project registered." }}</p>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        {% include "partials/project_section.html" %}
+        {% include "partials/context_section.html" %}
+        {% include "partials/loop_section.html" %}
+        {% include "partials/runs_section.html" %}
+        {% include "partials/run_detail_section.html" %}
+      </main>
+    </div>
+
+    <script>
+      const refreshSection = async (selector, url) => {
+        const target = document.querySelector(selector);
+        if (!target) return;
+        const response = await fetch(url, { headers: { "HX-Request": "true" } });
+        target.outerHTML = await response.text();
+      };
+
+      const refreshDashboard = async () => {
+        const selectedRun = document.body.dataset.selectedRun;
+        await Promise.all([
+          refreshSection("#loop-section", "/fragments/loop"),
+          refreshSection("#runs-section", "/fragments/runs"),
+          refreshSection(
+            "#run-detail-section",
+            selectedRun ? `/fragments/run-detail?run_id=${selectedRun}` : "/fragments/run-detail"
+          ),
+        ]);
+      };
+
+      if (window.EventSource) {
+        const source = new EventSource("/api/events");
+        source.addEventListener("message", async (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload.event_type === "round_started" && payload.payload.round_id) {
+              document.body.dataset.selectedRun = String(payload.payload.round_id);
+            }
+          } catch (error) {
+            console.error("Failed to parse SSE payload", error);
+          }
+          await refreshDashboard();
+        });
+      }
+    </script>
+  </body>
+</html>

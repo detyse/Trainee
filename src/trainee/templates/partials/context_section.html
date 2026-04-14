@@ -1,0 +1,49 @@
+<section id="context-section" class="panel" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Project Context</p>
+      <h2>Agent Understanding</h2>
+    </div>
+  </div>
+
+  {% if context %}
+    <form
+      class="stacked-form"
+      method="post"
+      action="/ui/project/context"
+      hx-post="/ui/project/context"
+      hx-target="#context-section"
+      hx-swap="outerHTML"
+    >
+      <label>
+        <span>Project summary</span>
+        <textarea name="project_summary" rows="7">{{ context.project_summary }}</textarea>
+      </label>
+      <label>
+        <span>Training entrypoint summary</span>
+        <textarea name="training_entrypoint_summary" rows="5">{{ context.training_entrypoint_summary }}</textarea>
+      </label>
+      <label>
+        <span>Data summary</span>
+        <textarea name="data_summary" rows="5">{{ context.data_summary }}</textarea>
+      </label>
+      <label>
+        <span>Parameter summary</span>
+        <textarea name="parameter_summary" rows="5">{{ context.parameter_summary }}</textarea>
+      </label>
+      <label>
+        <span>Result reading summary</span>
+        <textarea name="result_reading_summary" rows="5">{{ context.result_reading_summary }}</textarea>
+      </label>
+      <label>
+        <span>Warnings JSON</span>
+        <textarea name="warnings_json" rows="4">{{ context.warnings | tojson(indent=2) }}</textarea>
+      </label>
+      <div class="actions">
+        <button class="secondary" type="submit">Save Context Overrides</button>
+      </div>
+    </form>
+  {% else %}
+    <p class="empty">Register a project to populate the runtime context.</p>
+  {% endif %}
+</section>

@@ -1,0 +1,51 @@
+<section id="run-detail-section" class="panel" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Selected Round</p>
+      <h2>Run Detail</h2>
+    </div>
+  </div>
+
+  {% if selected_run %}
+    <div class="detail-block">
+      <span class="label">Status</span>
+      <span class="status-pill status-{{ selected_run.status|replace('_', '-') }}">{{ selected_run.status }}</span>
+    </div>
+    <div class="detail-block">
+      <span class="label">Resolved command</span>
+      <code>{{ selected_run.resolved_command }}</code>
+    </div>
+    <div class="detail-block">
+      <span class="label">Param values</span>
+      <pre>{{ selected_run.param_values | tojson(indent=2) }}</pre>
+    </div>
+    <div class="detail-block">
+      <span class="label">Log paths</span>
+      {% for path in selected_run.log_paths %}
+        <div><code>{{ path }}</code></div>
+      {% endfor %}
+    </div>
+    <div class="detail-block">
+      <span class="label">Metrics</span>
+      <pre>{{ selected_run.metrics | tojson(indent=2) }}</pre>
+    </div>
+    {% if selected_run.agent_decision %}
+      <div class="detail-block">
+        <span class="label">Agent decision</span>
+        <pre>{{ selected_decision_json }}</pre>
+      </div>
+    {% endif %}
+    {% if selected_run.error %}
+      <div class="detail-block danger">
+        <span class="label">Error</span>
+        <p>{{ selected_run.error }}</p>
+      </div>
+    {% endif %}
+    <div class="detail-block">
+      <span class="label">Recent log tail</span>
+      <pre class="log-tail">{{ selected_log_excerpt or "No log content available." }}</pre>
+    </div>
+  {% else %}
+    <p class="empty">Select a round from the history table to inspect it.</p>
+  {% endif %}
+</section>

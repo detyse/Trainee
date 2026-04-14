@@ -1,0 +1,43 @@
+<section id="loop-section" class="panel" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Loop Control</p>
+      <h2>Runtime State</h2>
+    </div>
+    <span class="status-pill status-{{ loop.status|replace('_', '-') }}">{{ loop.status }}</span>
+  </div>
+
+  <div class="stat-grid">
+    <div>
+      <span class="label">Session</span>
+      <strong>{{ loop.current_session_id or "none" }}</strong>
+    </div>
+    <div>
+      <span class="label">Round</span>
+      <strong>{{ loop.current_round_index }}</strong>
+    </div>
+    <div>
+      <span class="label">Requested stop</span>
+      <strong>{{ "yes" if loop.requested_stop else "no" }}</strong>
+    </div>
+    <div>
+      <span class="label">Last heartbeat</span>
+      <strong>{{ loop.last_heartbeat_at or "n/a" }}</strong>
+    </div>
+    <div>
+      <span class="label">Last signal</span>
+      <strong>{{ loop.last_signal_at or "n/a" }}</strong>
+    </div>
+  </div>
+
+  <p class="loop-message">{{ loop.message or "No active loop." }}</p>
+
+  <div class="actions">
+    <form method="post" action="/ui/loop/start" hx-post="/ui/loop/start" hx-target="#loop-section" hx-swap="outerHTML">
+      <button class="primary" type="submit" {% if not spec %}disabled{% endif %}>Start Loop</button>
+    </form>
+    <form method="post" action="/ui/loop/stop" hx-post="/ui/loop/stop" hx-target="#loop-section" hx-swap="outerHTML">
+      <button class="secondary" type="submit">Stop After Current Round</button>
+    </form>
+  </div>
+</section>

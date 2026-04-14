@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+from trainee.models import AgentDecision, ProjectContext, ProjectSpec, RoundRecord
+from trainee.settings import Settings
+
+
+class DecisionEngine:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def decide(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> AgentDecision:
+        if not spec.tunable_params:
+            return AgentDecision(
+                action="stop",
+                next_params=current_params,
+                reason="No tunable_params are configured, so the loop stops after collecting the latest result.",
+                focus_metrics=self._focus_metrics(spec),
+            )
+
+        decision = await self._provider_decision(spec, context, history, current_params)
+        if decision is not None:
+            try:
+                normalized = spec.merge_param_values(decision.next_params, base=current_params)
+            except ValueError:
+                pass
+            else:
+                decision.next_params = normalized
+                return decision
+
+        return self._heuristic_decision(spec, history, current_params)
+
+    async def _provider_decision(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> Optional[AgentDecision]:
+        if self.settings.llm_provider == "openai" and self.settings.openai_api_key:
+            return await self._openai_decision(spec, context, history, current_params)
+        if self.settings.llm_provider == "anthropic" and self.settings.anthropic_api_key:
+            return await self._anthropic_decision(spec, context, history, current_params)
+        return None
+
+    async def _openai_decision(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> Optional[AgentDecision]:
+        prompt = self._build_prompt(spec, context, history, current_params)
+        payload = {
+            "model": self.settings.openai_model,
+            "messages": [
+                {"role": "system", "content": self._system_prompt()},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+        }
+        url = self.settings.openai_base_url.rstrip("/") + "/chat/completions"
+        headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+            candidate = self._extract_json(content)
+            return AgentDecision.model_validate(candidate)
+        except Exception:
+            return None
+
+    async def _anthropic_decision(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> Optional[AgentDecision]:
+        prompt = self._build_prompt(spec, context, history, current_params)
+        payload = {
+            "model": self.settings.anthropic_model,
+            "max_tokens": self.settings.anthropic_max_tokens,
+            "system": self._system_prompt(),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "temperature": 0.2,
+        }
+        url = self.settings.anthropic_base_url.rstrip("/") + "/v1/messages"
+        headers = {
+            "x-api-key": self.settings.anthropic_api_key,
+            "anthropic-version": self.settings.anthropic_version,
+            "content-type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                body = response.json()
+                text_parts = [
+                    block.get("text", "")
+                    for block in body.get("content", [])
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                content = "\n".join(part for part in text_parts if part)
+            candidate = self._extract_json(content)
+            return AgentDecision.model_validate(candidate)
+        except Exception:
+            return None
+
+    def _system_prompt(self) -> str:
+        return (
+            "You are a training automation agent. Respond with JSON only. "
+            "Schema: {\"action\":\"continue|stop\",\"next_params\":{...},"
+            "\"reason\":\"...\",\"focus_metrics\":[\"...\"]}. "
+            "Only touch whitelisted tunable params."
+        )
+
+    def _heuristic_decision(
+        self,
+        spec: ProjectSpec,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> AgentDecision:
+        latest = history[-1]
+        primary_metric = self._primary_metric(spec, latest.metrics)
+        next_params = dict(current_params)
+        numeric_params = [param for param in spec.tunable_params if param.type in {"int", "float"}]
+
+        if primary_metric is None:
+            return AgentDecision(
+                action="stop",
+                next_params=current_params,
+                reason="No primary metric was available for the heuristic fallback agent.",
+                focus_metrics=self._focus_metrics(spec),
+            )
+
+        metric_name = primary_metric.name
+        current_value = float(latest.metrics[metric_name])
+        previous_value = None
+        if len(history) > 1 and metric_name in history[-2].metrics:
+            previous_value = float(history[-2].metrics[metric_name])
+
+        improvement = True
+        if previous_value is not None:
+            if primary_metric.goal == "min":
+                improvement = current_value <= previous_value
+            else:
+                improvement = current_value >= previous_value
+
+        target_param = self._pick_target_param(spec, numeric_params)
+        if target_param is not None and (previous_value is None or not improvement):
+            baseline = next_params.get(target_param.name, target_param.default)
+            baseline = target_param.normalize_value(baseline)
+            if target_param.type == "int":
+                step = -1 if primary_metric.goal == "min" else 1
+                candidate = int(baseline) + step
+            else:
+                factor = 0.8 if primary_metric.goal == "min" else 1.2
+                candidate = float(baseline) * factor
+            next_params[target_param.name] = target_param.normalize_value(candidate)
+            reason = (
+                f"Heuristic fallback adjusted {target_param.name} after observing {metric_name}={current_value}."
+            )
+        else:
+            reason = (
+                f"Heuristic fallback kept parameters unchanged because {metric_name} showed acceptable progress."
+            )
+
+        return AgentDecision(
+            action="continue",
+            next_params=spec.merge_param_values(next_params, base=current_params),
+            reason=reason,
+            focus_metrics=[metric_name],
+        )
+
+    def _pick_target_param(self, spec: ProjectSpec, numeric_params: List[Any]) -> Any:
+        for param in numeric_params:
+            signature = f"{param.name} {param.flag}".lower()
+            if any(token in signature for token in ("lr", "learning_rate", "learning-rate")):
+                return param
+        return numeric_params[0] if numeric_params else None
+
+    def _primary_metric(self, spec: ProjectSpec, metrics: Dict[str, Any]):
+        if spec.metric_specs:
+            for item in spec.metric_specs:
+                if item.name in metrics:
+                    return item
+        for fallback_name in ("total_loss", "loss"):
+            if fallback_name in metrics:
+                goal = "min"
+                return spec.metric_index().get(
+                    fallback_name,
+                    type("FallbackMetric", (), {"name": fallback_name, "goal": goal})(),
+                )
+        return None
+
+    def _focus_metrics(self, spec: ProjectSpec) -> List[str]:
+        if spec.metric_specs:
+            return [item.name for item in spec.metric_specs]
+        return ["loss", "total_loss"]
+
+    def _build_prompt(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> str:
+        recent_history = []
+        for item in history[-5:]:
+            recent_history.append(
+                {
+                    "round_index": item.round_index,
+                    "status": item.status,
+                    "param_values": item.param_values,
+                    "metrics": item.metrics,
+                    "exit_code": item.exit_code,
+                }
+            )
+        return json.dumps(
+            {
+                "project_context": context.model_dump(mode="json"),
+                "tunable_params": [item.model_dump(mode="json") for item in spec.tunable_params],
+                "metric_specs": [item.model_dump(mode="json") for item in spec.metric_specs],
+                "metric_prompt": spec.metric_prompt,
+                "tuning_prompt": spec.tuning_prompt,
+                "current_params": current_params,
+                "recent_history": recent_history,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    def _extract_json(self, content: str) -> Dict[str, Any]:
+        content = content.strip()
+        if content.startswith("{"):
+            return json.loads(content)
+        start = content.find("{")
+        end = content.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("no JSON object found in completion")
+        return json.loads(content[start : end + 1])

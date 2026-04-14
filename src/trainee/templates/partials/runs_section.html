@@ -1,0 +1,65 @@
+<section id="runs-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Rounds</p>
+      <h2>Run History</h2>
+    </div>
+    <span class="muted">{{ rounds|length }} recorded</span>
+  </div>
+
+  {% if rounds %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Round</th>
+            <th>Status</th>
+            <th>Metrics</th>
+            <th>Command</th>
+            <th>W&amp;B</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in rounds %}
+            <tr>
+              <td>
+                <button
+                  class="link-button"
+                  type="button"
+                  hx-get="/fragments/run-detail?run_id={{ run.id }}"
+                  hx-target="#run-detail-section"
+                  hx-swap="outerHTML"
+                  onclick="document.body.dataset.selectedRun='{{ run.id }}'"
+                >
+                  #{{ run.id }}
+                </button>
+              </td>
+              <td>{{ run.round_index }}</td>
+              <td><span class="status-pill status-{{ run.status|replace('_', '-') }}">{{ run.status }}</span></td>
+              <td>
+                {% if run.metrics %}
+                  {% for key, value in run.metrics.items() %}
+                    <div>{{ key }}={{ value }}</div>
+                  {% endfor %}
+                {% else %}
+                  <span class="muted">n/a</span>
+                {% endif %}
+              </td>
+              <td><code>{{ run.resolved_command }}</code></td>
+              <td>
+                {% if run.wandb_run_url %}
+                  <a href="{{ run.wandb_run_url }}" target="_blank" rel="noreferrer">open</a>
+                {% else %}
+                  <span class="muted">n/a</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="empty">No rounds have been executed yet.</p>
+  {% endif %}
+</section>

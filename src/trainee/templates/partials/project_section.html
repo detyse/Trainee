@@ -1,0 +1,90 @@
+<section id="project-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Project Spec</p>
+      <h2>External Training Project</h2>
+    </div>
+    {% if spec %}
+      <span class="muted">{{ spec.project_root }}</span>
+    {% endif %}
+  </div>
+
+  <form
+    class="stacked-form"
+    method="post"
+    action="/ui/project/register"
+    hx-post="/ui/project/register"
+    hx-target="#project-section"
+    hx-swap="outerHTML"
+  >
+    <label>
+      <span>Project root</span>
+      <input type="text" name="project_root" value="{{ spec.project_root if spec else '' }}" placeholder="/path/to/project" />
+    </label>
+    <label>
+      <span>Working dir</span>
+      <input type="text" name="working_dir" value="{{ spec.working_dir if spec else '' }}" placeholder="/path/to/project" />
+    </label>
+    <label>
+      <span>Launcher template</span>
+      <textarea name="launcher_template" rows="3" placeholder="conda run -n trainer python {project_root}/train.py {extra_args}">{{ spec.launcher_template if spec else '' }}</textarea>
+    </label>
+
+    <div class="two-col">
+      <label>
+        <span>Data paths JSON</span>
+        <textarea name="data_paths_json" rows="4">{{ spec.data_paths | tojson(indent=2) if spec else '[]' }}</textarea>
+      </label>
+      <label>
+        <span>Log paths JSON</span>
+        <textarea name="log_paths_json" rows="4">{{ spec.log_paths | tojson(indent=2) if spec else '[]' }}</textarea>
+      </label>
+    </div>
+
+    <div class="three-col">
+      <label>
+        <span>Heartbeat sec</span>
+        <input type="number" step="0.1" name="heartbeat_interval_sec" value="{{ spec.heartbeat_interval_sec if spec else 5 }}" />
+      </label>
+      <label>
+        <span>Stall timeout sec</span>
+        <input type="number" step="0.1" name="stall_timeout_sec" value="{{ spec.stall_timeout_sec if spec else 120 }}" />
+      </label>
+      <label>
+        <span>Max rounds</span>
+        <input type="number" step="1" name="max_rounds" value="{{ spec.max_rounds if spec else 3 }}" />
+      </label>
+    </div>
+
+    <label class="checkbox-row">
+      <input type="checkbox" name="wandb_enabled" {% if spec and spec.wandb_enabled %}checked{% endif %} />
+      <span>W&amp;B enabled</span>
+    </label>
+
+    <div class="two-col">
+      <label>
+        <span>Tunable params JSON</span>
+        <textarea name="tunable_params_json" rows="10">{{ tunable_params_json }}</textarea>
+      </label>
+      <label>
+        <span>Metric specs JSON</span>
+        <textarea name="metric_specs_json" rows="10">{{ metric_specs_json }}</textarea>
+      </label>
+    </div>
+
+    <div class="two-col">
+      <label>
+        <span>Metric prompt</span>
+        <textarea name="metric_prompt" rows="4" placeholder="Tell the agent which metrics matter most.">{{ spec.metric_prompt if spec else '' }}</textarea>
+      </label>
+      <label>
+        <span>Tuning prompt</span>
+        <textarea name="tuning_prompt" rows="4" placeholder="Tell the agent how to explore parameters.">{{ spec.tuning_prompt if spec else '' }}</textarea>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button class="primary" type="submit">Save Project</button>
+    </div>
+  </form>
+</section>
