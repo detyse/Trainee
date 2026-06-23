@@ -4,8 +4,8 @@
       <p class="panel-kicker">Project Spec</p>
       <h2>External Training Project</h2>
     </div>
-    {% if spec %}
-      <span class="muted">{{ spec.project_root }}</span>
+    {% if spec or runtime_settings.launch_project_root %}
+      <span class="muted">{{ spec.project_root if spec else runtime_settings.launch_project_root }}</span>
     {% endif %}
   </div>
 
@@ -19,15 +19,15 @@
   >
     <label>
       <span>Project root</span>
-      <input type="text" name="project_root" value="{{ spec.project_root if spec else '' }}" placeholder="/path/to/project" />
+      <input type="text" name="project_root" value="{{ spec.project_root if spec else runtime_settings.launch_project_root }}" placeholder="/path/to/project" />
     </label>
     <label>
       <span>Working dir</span>
-      <input type="text" name="working_dir" value="{{ spec.working_dir if spec else '' }}" placeholder="/path/to/project" />
+      <input type="text" name="working_dir" value="{{ spec.working_dir if spec else runtime_settings.launch_project_root }}" placeholder="/path/to/project" />
     </label>
     <label>
       <span>Launcher template</span>
-      <textarea name="launcher_template" rows="3" placeholder="conda run -n trainer python {project_root}/train.py {extra_args}">{{ spec.launcher_template if spec else '' }}</textarea>
+      <textarea name="launcher_template" rows="3" placeholder="conda run -n trainer python {project_root}/train.py {extra_args}">{{ spec.launcher_template if spec else runtime_settings.launch_launcher_template }}</textarea>
     </label>
 
     <div class="two-col">
@@ -75,12 +75,60 @@
     <div class="two-col">
       <label>
         <span>Metric prompt</span>
-        <textarea name="metric_prompt" rows="4" placeholder="Tell the agent which metrics matter most.">{{ spec.metric_prompt if spec else '' }}</textarea>
+        <textarea id="metric-prompt-input" name="metric_prompt" rows="4" placeholder="Tell the agent which metrics matter most.">{{ spec.metric_prompt if spec else '' }}</textarea>
       </label>
       <label>
         <span>Tuning prompt</span>
-        <textarea name="tuning_prompt" rows="4" placeholder="Tell the agent how to explore parameters.">{{ spec.tuning_prompt if spec else '' }}</textarea>
+        <textarea id="tuning-prompt-input" name="tuning_prompt" rows="4" placeholder="Tell the agent how to explore parameters.">{{ spec.tuning_prompt if spec else '' }}</textarea>
       </label>
+    </div>
+
+    <div class="preset-box">
+      <div class="panel-header compact">
+        <div>
+          <p class="panel-kicker">Prompt Presets</p>
+          <h3>Saved Prompt Templates</h3>
+        </div>
+        <span class="muted">{{ prompt_presets|length }} saved</span>
+      </div>
+      <div class="preset-grid">
+        <label>
+          <span>Preset</span>
+          <select id="prompt-preset-select" name="prompt_preset_id" onchange="window.applyPromptPreset && window.applyPromptPreset(this)">
+            <option value="">Select a prompt preset</option>
+            {% for preset in prompt_presets %}
+              <option value="{{ preset.id }}">{{ preset.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Preset name</span>
+          <input id="prompt-preset-name-input" type="text" name="prompt_preset_name" placeholder="e.g. fast debug, final sweep" />
+        </label>
+      </div>
+      <div class="actions">
+        <button
+          class="secondary"
+          type="submit"
+          formaction="/ui/prompt-presets/apply"
+          hx-post="/ui/prompt-presets/apply"
+          hx-target="#project-section"
+          hx-swap="outerHTML"
+        >
+          Apply Preset
+        </button>
+        <button
+          class="secondary"
+          type="submit"
+          formaction="/ui/prompt-presets/save"
+          hx-post="/ui/prompt-presets/save"
+          hx-target="#project-section"
+          hx-swap="outerHTML"
+        >
+          Save Prompt Preset
+        </button>
+      </div>
+      <script type="application/json" id="prompt-presets-data">{{ prompt_presets_payload | tojson }}</script>
     </div>
 
     <div class="actions">

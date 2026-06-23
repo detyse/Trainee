@@ -3,18 +3,22 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import FormData
 
 from trainee.events import EventBus
-from trainee.models import ProjectContext, ProjectSpec
+from trainee.logging import configure_logging, get_logger
+from trainee.models import ProjectContext, ProjectSpec, PromptPreset
 from trainee.orchestrator import RuntimeService
-from trainee.settings import Settings, load_settings
+from trainee.reporter import ReportGenerator
+from trainee.settings import Settings, load_settings, save_provider_config
 from trainee.storage import Storage
 
 MAX_LLM_TEST_IMAGE_BYTES = 5 * 1024 * 1024
@@ -31,6 +35,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         storage = Storage(app_settings.database_path)
         event_bus = EventBus()
         runtime = RuntimeService(app_settings, storage, event_bus)
+        app.state.started_at_monotonic = time.monotonic()
         app.state.settings = app_settings
         app.state.storage = storage
         app.state.event_bus = event_bus
@@ -42,6 +47,23 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
 
     app = FastAPI(title="Trainee", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(app_settings.static_dir)), name="static")
+
+    @app.middleware("http")
+    async def request_logging_middleware(request: Request, call_next):
+        started = time.monotonic()
+        response = await call_next(request)
+        logger.info(
+            "request",
+            extra={
+                "_trainee_extra": {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                }
+            },
+        )
+        return response
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request, run_id: Optional[int] = None) -> HTMLResponse:
@@ -100,10 +122,29 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         payload = runtime.dashboard_payload(selected_run_id=run_id)
         return templates.TemplateResponse(request, "partials/run_detail_section.html", {"request": request, **payload})
 
+    @app.get("/fragments/prompt", response_class=HTMLResponse)
+    async def prompt_fragment(request: Request, run_id: Optional[int] = None) -> HTMLResponse:
+        runtime = get_runtime(request)
+        payload = runtime.dashboard_payload(selected_run_id=run_id)
+        return templates.TemplateResponse(request, "partials/prompt_section.html", {"request": request, **payload})
+
+    @app.get("/fragments/runtime", response_class=HTMLResponse)
+    async def runtime_fragment(request: Request) -> HTMLResponse:
+        runtime = get_runtime(request)
+        payload = runtime.dashboard_payload()
+        return templates.TemplateResponse(
+            request,
+            "partials/runtime_section.html",
+            {"request": request, **payload, "health": _health_payload(request)},
+        )
+
     @app.post("/api/project/register")
     async def api_register_project(request: Request, spec: ProjectSpec) -> JSONResponse:
         runtime = get_runtime(request)
-        bundle = await runtime.register_project(spec)
+        try:
+            bundle = await runtime.register_project(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(bundle.model_dump(mode="json"))
 
     @app.post("/api/project/context")
@@ -117,19 +158,61 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         runtime = get_runtime(request)
         return JSONResponse(runtime.get_bundle().model_dump(mode="json"))
 
-    @app.post("/api/loop/start")
-    async def api_start_loop(request: Request) -> JSONResponse:
+    @app.get("/api/health")
+    async def api_health(request: Request) -> JSONResponse:
+        return JSONResponse(_health_payload(request))
+
+    @app.get("/api/prompt-preview")
+    async def api_get_prompt_preview(request: Request, run_id: Optional[int] = None) -> JSONResponse:
         runtime = get_runtime(request)
+        payload = runtime.dashboard_payload(selected_run_id=run_id)
+        preview = payload["prompt_preview"]
+        return JSONResponse(
+            {
+                "label": payload["prompt_preview_label"],
+                "prompt_preview": preview.model_dump(mode="json") if preview else None,
+            }
+        )
+
+    @app.get("/api/prompt-presets")
+    async def api_get_prompt_presets(request: Request, project_root: Optional[str] = None) -> JSONResponse:
+        runtime = get_runtime(request)
+        presets = runtime.storage.list_prompt_presets(project_root)
+        return JSONResponse({"presets": [item.model_dump(mode="json") for item in presets]})
+
+    @app.post("/api/prompt-presets")
+    async def api_save_prompt_preset(request: Request, preset: PromptPreset) -> JSONResponse:
+        runtime = get_runtime(request)
+        saved = await runtime.save_prompt_preset(
+            name=preset.name,
+            metric_prompt=preset.metric_prompt,
+            tuning_prompt=preset.tuning_prompt,
+            project_root=preset.project_root,
+            preset_id=preset.id,
+        )
+        return JSONResponse(saved.model_dump(mode="json"))
+
+    @app.post("/api/loop/start")
+    async def api_start_loop(request: Request, resume_session_id: Optional[int] = None) -> JSONResponse:
+        runtime = get_runtime(request)
+        with suppress(Exception):
+            payload = await request.json()
+            if isinstance(payload, dict) and payload.get("resume_session_id") is not None:
+                resume_session_id = int(payload["resume_session_id"])
         try:
-            snapshot = await runtime.start_loop()
+            snapshot = await runtime.start_loop(resume_session_id=resume_session_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(snapshot.model_dump(mode="json"))
 
     @app.post("/api/loop/stop")
-    async def api_stop_loop(request: Request) -> JSONResponse:
+    async def api_stop_loop(request: Request, force: bool = False) -> JSONResponse:
         runtime = get_runtime(request)
-        snapshot = await runtime.stop_loop()
+        with suppress(Exception):
+            payload = await request.json()
+            if isinstance(payload, dict) and "force" in payload:
+                force = _coerce_bool(payload["force"])
+        snapshot = await runtime.stop_loop(force=force)
         return JSONResponse(snapshot.model_dump(mode="json"))
 
     @app.get("/api/loop")
@@ -157,6 +240,17 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         if selected_run is None:
             raise HTTPException(status_code=404, detail="run not found")
         return JSONResponse(selected_run.model_dump(mode="json"))
+
+    @app.get("/api/sessions/{session_id}/report")
+    async def api_get_session_report(request: Request, session_id: int, format: str = "markdown"):
+        runtime = get_runtime(request)
+        try:
+            report = ReportGenerator(runtime.storage).generate_session_report(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if format == "html":
+            return HTMLResponse(f"<pre>{html.escape(report)}</pre>")
+        return PlainTextResponse(report, media_type="text/markdown")
 
     @app.get("/api/events")
     async def api_events(request: Request) -> StreamingResponse:
@@ -214,20 +308,65 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     ) -> HTMLResponse:
         runtime = get_runtime(request)
         try:
-            spec = ProjectSpec(
+            spec = _project_spec_from_values(
                 project_root=project_root,
                 working_dir=working_dir,
                 launcher_template=launcher_template,
-                data_paths=_parse_json_field(data_paths_json, "data_paths_json"),
-                log_paths=_parse_json_field(log_paths_json, "log_paths_json"),
+                data_paths_json=data_paths_json,
+                log_paths_json=log_paths_json,
                 wandb_enabled=wandb_enabled is not None,
                 heartbeat_interval_sec=heartbeat_interval_sec,
                 stall_timeout_sec=stall_timeout_sec,
                 max_rounds=max_rounds,
-                tunable_params=_parse_json_field(tunable_params_json, "tunable_params_json"),
-                metric_specs=_parse_json_field(metric_specs_json, "metric_specs_json"),
+                tunable_params_json=tunable_params_json,
+                metric_specs_json=metric_specs_json,
                 metric_prompt=metric_prompt,
                 tuning_prompt=tuning_prompt,
+            )
+            await runtime.register_project(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await _render_refresh_response(request, templates, runtime)
+
+    @app.post("/ui/prompt-presets/save")
+    async def ui_save_prompt_preset(request: Request) -> HTMLResponse:
+        runtime = get_runtime(request)
+        form = await request.form()
+        try:
+            spec = _project_spec_from_form(form)
+            await runtime.register_project(spec)
+            preset_id = _form_str(form, "prompt_preset_id")
+            preset_name = _form_str(form, "prompt_preset_name")
+            if not preset_name and preset_id:
+                existing = runtime.storage.get_prompt_preset(preset_id)
+                preset_name = existing.name if existing else ""
+            await runtime.save_prompt_preset(
+                name=preset_name or "Default Prompt",
+                metric_prompt=spec.metric_prompt,
+                tuning_prompt=spec.tuning_prompt,
+                project_root=spec.project_root,
+                preset_id=preset_id or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await _render_refresh_response(request, templates, runtime)
+
+    @app.post("/ui/prompt-presets/apply")
+    async def ui_apply_prompt_preset(request: Request) -> HTMLResponse:
+        runtime = get_runtime(request)
+        form = await request.form()
+        preset_id = _form_str(form, "prompt_preset_id")
+        if not preset_id:
+            raise HTTPException(status_code=400, detail="select a prompt preset first")
+        preset = runtime.storage.get_prompt_preset(preset_id)
+        if preset is None:
+            raise HTTPException(status_code=404, detail="prompt preset not found")
+        try:
+            spec = _project_spec_from_form(form).model_copy(
+                update={
+                    "metric_prompt": preset.metric_prompt,
+                    "tuning_prompt": preset.tuning_prompt,
+                }
             )
             await runtime.register_project(spec)
         except ValueError as exc:
@@ -256,6 +395,69 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         await runtime.update_project_context(context)
         return await _render_refresh_response(request, templates, runtime)
 
+    @app.post("/ui/runtime/provider")
+    async def ui_update_provider_settings(
+        request: Request,
+        llm_provider: str = Form("none"),
+        llm_timeout_sec: float = Form(30.0),
+        openai_api_key: str = Form(""),
+        clear_openai_api_key: Optional[str] = Form(None),
+        openai_base_url: str = Form("https://api.openai.com/v1"),
+        openai_model: str = Form("gpt-4o-mini"),
+        anthropic_api_key: str = Form(""),
+        clear_anthropic_api_key: Optional[str] = Form(None),
+        anthropic_base_url: str = Form("https://api.anthropic.com"),
+        anthropic_model: str = Form("claude-3-5-haiku-latest"),
+        anthropic_version: str = Form("2023-06-01"),
+        anthropic_max_tokens: int = Form(1024),
+    ) -> HTMLResponse:
+        runtime = get_runtime(request)
+        if runtime.loop_is_running():
+            raise HTTPException(status_code=409, detail="stop the loop before changing provider settings")
+        provider = llm_provider.strip().lower()
+        if provider not in {"none", "openai", "anthropic"}:
+            raise HTTPException(status_code=400, detail="provider must be one of: none, openai, anthropic")
+        if llm_timeout_sec <= 0:
+            raise HTTPException(status_code=400, detail="timeout must be positive")
+        if anthropic_max_tokens <= 0:
+            raise HTTPException(status_code=400, detail="anthropic max tokens must be positive")
+
+        provider_payload: Dict[str, Any] = {
+            "llm_provider": provider,
+            "llm_timeout_sec": llm_timeout_sec,
+            "openai": {
+                "base_url": openai_base_url.strip() or "https://api.openai.com/v1",
+                "model": openai_model.strip() or "gpt-4o-mini",
+            },
+            "anthropic": {
+                "base_url": anthropic_base_url.strip() or "https://api.anthropic.com",
+                "model": anthropic_model.strip() or "claude-3-5-haiku-latest",
+                "version": anthropic_version.strip() or "2023-06-01",
+                "max_tokens": anthropic_max_tokens,
+            },
+        }
+        if clear_openai_api_key is not None:
+            provider_payload["openai"]["api_key"] = None
+        elif openai_api_key.strip():
+            provider_payload["openai"]["api_key"] = openai_api_key.strip()
+        if clear_anthropic_api_key is not None:
+            provider_payload["anthropic"]["api_key"] = None
+        elif anthropic_api_key.strip():
+            provider_payload["anthropic"]["api_key"] = anthropic_api_key.strip()
+
+        try:
+            save_provider_config(runtime.settings.config_path, provider_payload)
+            updated_settings = load_settings(
+                repo_root=runtime.settings.repo_root,
+                data_dir=runtime.settings.data_dir,
+                project_root=runtime.settings.project_root,
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        request.app.state.settings = updated_settings
+        runtime.update_settings(updated_settings)
+        return await _render_refresh_response(request, templates, runtime)
+
     @app.post("/ui/loop/start")
     async def ui_start_loop(request: Request) -> HTMLResponse:
         runtime = get_runtime(request)
@@ -278,11 +480,108 @@ def get_runtime(request: Request) -> RuntimeService:
     return request.app.state.runtime  # type: ignore[return-value]
 
 
+def _health_payload(request: Request) -> Dict[str, Any]:
+    runtime = get_runtime(request)
+    db_ok = False
+    with suppress(Exception):
+        db_ok = runtime.storage.ping()
+    snapshot = runtime.get_bundle().loop
+    uptime = time.monotonic() - getattr(request.app.state, "started_at_monotonic", time.monotonic())
+    status = "healthy" if db_ok else "degraded"
+    return {
+        "status": status,
+        "uptime_sec": round(uptime, 3),
+        "loop_state": snapshot.status,
+        "current_round": snapshot.current_round_index,
+        "llm_provider": runtime.settings.llm_provider,
+        "db_ok": db_ok,
+    }
+
+
 def _parse_json_field(raw: str, field_name: str) -> Any:
     try:
         return json.loads(raw or "[]")
     except json.JSONDecodeError as exc:
         raise ValueError(f"{field_name} must be valid JSON") from exc
+
+
+def _project_spec_from_values(
+    *,
+    project_root: str,
+    working_dir: str,
+    launcher_template: str,
+    data_paths_json: str,
+    log_paths_json: str,
+    wandb_enabled: bool,
+    heartbeat_interval_sec: float,
+    stall_timeout_sec: float,
+    max_rounds: int,
+    tunable_params_json: str,
+    metric_specs_json: str,
+    metric_prompt: str,
+    tuning_prompt: str,
+) -> ProjectSpec:
+    return ProjectSpec(
+        project_root=project_root,
+        working_dir=working_dir,
+        launcher_template=launcher_template,
+        data_paths=_parse_json_field(data_paths_json, "data_paths_json"),
+        log_paths=_parse_json_field(log_paths_json, "log_paths_json"),
+        wandb_enabled=wandb_enabled,
+        heartbeat_interval_sec=heartbeat_interval_sec,
+        stall_timeout_sec=stall_timeout_sec,
+        max_rounds=max_rounds,
+        tunable_params=_parse_json_field(tunable_params_json, "tunable_params_json"),
+        metric_specs=_parse_json_field(metric_specs_json, "metric_specs_json"),
+        metric_prompt=metric_prompt,
+        tuning_prompt=tuning_prompt,
+    )
+
+
+def _project_spec_from_form(form: FormData) -> ProjectSpec:
+    return _project_spec_from_values(
+        project_root=_form_str(form, "project_root"),
+        working_dir=_form_str(form, "working_dir"),
+        launcher_template=_form_str(form, "launcher_template"),
+        data_paths_json=_form_str(form, "data_paths_json", "[]"),
+        log_paths_json=_form_str(form, "log_paths_json", "[]"),
+        wandb_enabled=_form_checkbox(form, "wandb_enabled"),
+        heartbeat_interval_sec=_form_float(form, "heartbeat_interval_sec", 5.0),
+        stall_timeout_sec=_form_float(form, "stall_timeout_sec", 120.0),
+        max_rounds=_form_int(form, "max_rounds", 3),
+        tunable_params_json=_form_str(form, "tunable_params_json", "[]"),
+        metric_specs_json=_form_str(form, "metric_specs_json", "[]"),
+        metric_prompt=_form_str(form, "metric_prompt"),
+        tuning_prompt=_form_str(form, "tuning_prompt"),
+    )
+
+
+def _form_str(form: FormData, key: str, default: str = "") -> str:
+    value = form.get(key, default)
+    return str(value) if value is not None else default
+
+
+def _form_float(form: FormData, key: str, default: float) -> float:
+    raw = _form_str(form, key, str(default))
+    return float(raw or default)
+
+
+def _form_int(form: FormData, key: str, default: int) -> int:
+    raw = _form_str(form, key, str(default))
+    return int(raw or default)
+
+
+def _form_checkbox(form: FormData, key: str) -> bool:
+    value = form.get(key)
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"", "0", "false", "off", "none"}
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"", "0", "false", "off", "none"}
 
 
 def _format_sse(event_name: str, payload: Dict[str, Any]) -> str:
@@ -320,7 +619,7 @@ async def _read_llm_test_image(image: Optional[UploadFile]) -> Optional[Dict[str
 async def _render_refresh_response(request: Request, templates: Jinja2Templates, runtime: RuntimeService) -> HTMLResponse:
     if request.headers.get("HX-Request") == "true":
         payload = runtime.dashboard_payload()
-        return templates.TemplateResponse(request, "partials/oob_dashboard.html", {"request": request, **payload})
+        return templates.TemplateResponse(request, "partials/oob_dashboard.html", {"request": request, **payload, "health": _health_payload(request)})
     return RedirectResponse("/", status_code=303)
 
 

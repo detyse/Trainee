@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import os
 import shlex
+import signal
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +29,7 @@ class ExecutionResult:
     stalled: bool
     wandb_run_url: Optional[str]
     last_signal_at: Optional[str]
+    terminated_reason: Optional[str] = None
 
 
 class TrainingExecutor:
@@ -38,8 +41,10 @@ class TrainingExecutor:
         param_values: Dict[str, Any],
         artifacts_dir: Path,
         heartbeat: HeartbeatReporter,
+        stop_event: Optional[asyncio.Event] = None,
     ) -> ExecutionResult:
         started_at = utc_now()
+        self.validate_paths(spec, artifacts_dir)
         session_dir = artifacts_dir / f"session-{session_id:04d}"
         session_dir.mkdir(parents=True, exist_ok=True)
         internal_log_path = session_dir / f"round-{round_index:04d}.log"
@@ -55,6 +60,7 @@ class TrainingExecutor:
             cwd=str(working_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
 
         await heartbeat(
@@ -76,9 +82,28 @@ class TrainingExecutor:
             self._heartbeat_loop(spec, session_id, round_index, external_log_paths, state, heartbeat),
             name=f"round-{round_index}-heartbeat",
         )
+        wait_task = asyncio.create_task(process.wait(), name=f"round-{round_index}-wait")
+        stop_task = (
+            asyncio.create_task(stop_event.wait(), name=f"round-{round_index}-stop")
+            if stop_event is not None
+            else None
+        )
 
-        await reader_task
-        exit_code = await process.wait()
+        terminated_reason = await self._wait_for_completion(
+            process=process,
+            spec=spec,
+            state=state,
+            wait_task=wait_task,
+            stop_task=stop_task,
+        )
+        exit_code = await wait_task
+
+        if stop_task is not None:
+            stop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stop_task
+        with suppress(asyncio.CancelledError):
+            await reader_task
         heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await heartbeat_task
@@ -95,7 +120,56 @@ class TrainingExecutor:
             stalled=state.stalled,
             wandb_run_url=state.wandb_run_url,
             last_signal_at=state.last_signal_at,
+            terminated_reason=terminated_reason,
         )
+
+    async def _wait_for_completion(
+        self,
+        *,
+        process: asyncio.subprocess.Process,
+        spec: ProjectSpec,
+        state: "_ExecutionState",
+        wait_task: asyncio.Task[int],
+        stop_task: Optional[asyncio.Task[bool]],
+    ) -> Optional[str]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + spec.round_timeout_sec if spec.round_timeout_sec is not None else None
+
+        while not wait_task.done():
+            waiters: List[asyncio.Task[Any]] = [wait_task]
+            if stop_task is not None:
+                waiters.append(stop_task)
+            done, _ = await asyncio.wait(waiters, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
+            if wait_task in done:
+                return None
+            if stop_task is not None and stop_task in done:
+                await self.kill_process(process)
+                return "stop_requested"
+            if deadline is not None and loop.time() >= deadline:
+                await self.kill_process(process)
+                return "timeout"
+            if spec.kill_on_stall and state.stalled:
+                await self.kill_process(process)
+                return "stall"
+        return None
+
+    async def kill_process(self, process: asyncio.subprocess.Process, grace_sec: float = 10.0) -> None:
+        if process.returncode is not None:
+            return
+
+        self._signal_process_group(process, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_sec)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        self._signal_process_group(process, signal.SIGKILL)
+        await process.wait()
+
+    def _signal_process_group(self, process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, sig)
 
     def render_command(self, spec: ProjectSpec, param_values: Dict[str, Any]) -> str:
         validated = spec.merge_param_values(param_values)
@@ -131,6 +205,28 @@ class TrainingExecutor:
             seen.add(marker)
             deduped.append(path)
         return deduped
+
+    def validate_paths(self, spec: ProjectSpec, artifacts_dir: Path) -> None:
+        project_root = Path(spec.project_root).expanduser().resolve()
+        working_dir = Path(spec.working_dir).expanduser().resolve()
+
+        self._ensure_within(working_dir, project_root, "working_dir")
+        for field_name, raw_paths in (("data_paths", spec.data_paths), ("log_paths", spec.log_paths)):
+            for raw_path in raw_paths:
+                candidate = self._configured_path(raw_path, working_dir)
+                self._ensure_within(candidate, project_root, field_name)
+
+    def _configured_path(self, raw_path: str, working_dir: Path) -> Path:
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = working_dir / path
+        return path.resolve()
+
+    def _ensure_within(self, path: Path, root: Path, field_name: str) -> None:
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must stay within project_root: {path}") from exc
 
     def _render_cli_args(self, spec: ProjectSpec, param_values: Dict[str, Any]) -> str:
         parts: List[str] = []

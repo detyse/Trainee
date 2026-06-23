@@ -1,0 +1,153 @@
+<section id="runtime-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Runtime</p>
+      <h2>Provider Settings</h2>
+    </div>
+    <span class="status-pill status-{{ health.status|replace('_', '-') }}">{{ health.status }}</span>
+  </div>
+
+  <div class="prompt-meta runtime-meta">
+    <div>
+      <span class="label">Provider</span>
+      <strong>{{ runtime_settings.llm_provider }}</strong>
+    </div>
+    <div>
+      <span class="label">Active model</span>
+      <strong>{{ runtime_settings.active_model }}</strong>
+    </div>
+    <div>
+      <span class="label">Timeout</span>
+      <strong>{{ runtime_settings.llm_timeout_sec }}s</strong>
+    </div>
+    <div>
+      <span class="label">Database</span>
+      <strong>{{ "ok" if health.db_ok else "failed" }}</strong>
+    </div>
+  </div>
+
+  <form
+    class="stacked-form"
+    method="post"
+    action="/ui/runtime/provider"
+    hx-post="/ui/runtime/provider"
+    hx-target="#runtime-section"
+    hx-swap="outerHTML"
+  >
+    <div class="three-col">
+      <label>
+        <span>Provider</span>
+        <select name="llm_provider">
+          <option value="none" {% if runtime_settings.llm_provider == "none" %}selected{% endif %}>none</option>
+          <option value="openai" {% if runtime_settings.llm_provider == "openai" %}selected{% endif %}>openai</option>
+          <option value="anthropic" {% if runtime_settings.llm_provider == "anthropic" %}selected{% endif %}>anthropic</option>
+        </select>
+      </label>
+      <label>
+        <span>Timeout sec</span>
+        <input type="number" step="0.1" min="0.1" name="llm_timeout_sec" value="{{ runtime_settings.llm_timeout_sec }}" />
+      </label>
+      <div>
+        <span class="label">Config file</span>
+        <code>{{ runtime_settings.config_path }}</code>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="settings-box">
+        <div class="panel-header compact">
+          <div>
+            <p class="panel-kicker">OpenAI</p>
+            <h3>{{ runtime_settings.openai_model }}</h3>
+          </div>
+          <span class="status-pill">{{ "key set" if runtime_settings.openai_key_configured else "no key" }}</span>
+        </div>
+        <div class="stacked-form">
+          <label>
+            <span>API key</span>
+            <input type="password" name="openai_api_key" autocomplete="off" placeholder="{{ 'configured; leave blank to keep' if runtime_settings.openai_key_configured else 'sk-...' }}" />
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="clear_openai_api_key" />
+            <span>Clear OpenAI key from config.json</span>
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input type="url" name="openai_base_url" value="{{ runtime_settings.openai_base_url }}" />
+          </label>
+          <label>
+            <span>Model</span>
+            <input type="text" name="openai_model" value="{{ runtime_settings.openai_model }}" />
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-box">
+        <div class="panel-header compact">
+          <div>
+            <p class="panel-kicker">Anthropic</p>
+            <h3>{{ runtime_settings.anthropic_model }}</h3>
+          </div>
+          <span class="status-pill">{{ "key set" if runtime_settings.anthropic_key_configured else "no key" }}</span>
+        </div>
+        <div class="stacked-form">
+          <label>
+            <span>API key</span>
+            <input type="password" name="anthropic_api_key" autocomplete="off" placeholder="{{ 'configured; leave blank to keep' if runtime_settings.anthropic_key_configured else 'sk-ant-...' }}" />
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="clear_anthropic_api_key" />
+            <span>Clear Anthropic key from config.json</span>
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input type="url" name="anthropic_base_url" value="{{ runtime_settings.anthropic_base_url }}" />
+          </label>
+          <label>
+            <span>Model</span>
+            <input type="text" name="anthropic_model" value="{{ runtime_settings.anthropic_model }}" />
+          </label>
+          <div class="two-col">
+            <label>
+              <span>Version</span>
+              <input type="text" name="anthropic_version" value="{{ runtime_settings.anthropic_version }}" />
+            </label>
+            <label>
+              <span>Max tokens</span>
+              <input type="number" step="1" min="1" name="anthropic_max_tokens" value="{{ runtime_settings.anthropic_max_tokens }}" />
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" type="submit" {% if loop.status in ["running", "running_round", "stopping"] %}disabled{% endif %}>Save Provider Settings</button>
+      <button class="secondary" type="button" onclick="window.runHealthCheck && window.runHealthCheck()">Run Health Check</button>
+    </div>
+  </form>
+
+  <div class="settings-box">
+    <div class="three-col">
+      <div>
+        <span class="label">Launch project</span>
+        <code>{{ runtime_settings.launch_project_root }}</code>
+      </div>
+      <div>
+        <span class="label">Data dir</span>
+        <code>{{ runtime_settings.data_dir }}</code>
+      </div>
+      <div>
+        <span class="label">Artifacts</span>
+        <code>{{ runtime_settings.artifacts_dir }}</code>
+      </div>
+    </div>
+  </div>
+
+  <details class="prompt-payload">
+    <summary>Compatibility env file</summary>
+    <code>{{ runtime_settings.dotenv_path }}</code>
+  </details>
+
+  <pre id="health-check-output" class="prompt-pre">{{ health | tojson(indent=2) }}</pre>
+</section>

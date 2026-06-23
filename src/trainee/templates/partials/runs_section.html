@@ -30,7 +30,7 @@
                   hx-get="/fragments/run-detail?run_id={{ run.id }}"
                   hx-target="#run-detail-section"
                   hx-swap="outerHTML"
-                  onclick="document.body.dataset.selectedRun='{{ run.id }}'"
+                  onclick="document.body.dataset.selectedRun='{{ run.id }}'; setTimeout(() => window.refreshPromptPreview && window.refreshPromptPreview(), 0)"
                 >
                   #{{ run.id }}
                 </button>

@@ -1,0 +1,47 @@
+<section id="prompt-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Prompt Preview</p>
+      <h2>Model Request</h2>
+    </div>
+    {% if prompt_preview %}
+      <span class="status-pill status-{{ prompt_preview.status|replace('_', '-') }}">{{ prompt_preview.status }}</span>
+    {% endif %}
+  </div>
+
+  {% if prompt_preview %}
+    <div class="prompt-meta">
+      <div>
+        <span class="label">Source</span>
+        <strong>{{ prompt_preview_label }}</strong>
+      </div>
+      <div>
+        <span class="label">Provider</span>
+        <strong>{{ prompt_preview.provider }}</strong>
+      </div>
+      <div>
+        <span class="label">Model</span>
+        <strong>{{ prompt_preview.model or "n/a" }}</strong>
+      </div>
+      <div>
+        <span class="label">Created</span>
+        <strong>{{ prompt_preview.created_at }}</strong>
+      </div>
+    </div>
+
+    <div class="prompt-block">
+      <span class="label">System prompt</span>
+      <pre class="prompt-pre">{{ prompt_preview.system_prompt }}</pre>
+    </div>
+    <div class="prompt-block">
+      <span class="label">User prompt</span>
+      <pre class="prompt-pre tall">{{ prompt_preview.user_prompt }}</pre>
+    </div>
+    <details class="prompt-payload">
+      <summary>Provider payload JSON</summary>
+      <pre class="prompt-pre tall">{{ prompt_payload_json }}</pre>
+    </details>
+  {% else %}
+    <p class="empty">Save a project with tunable parameters to preview the prompt used for LLM decisions.</p>
+  {% endif %}
+</section>

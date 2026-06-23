@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -91,6 +92,8 @@ class ProjectSpec(BaseModel):
     wandb_enabled: bool = False
     heartbeat_interval_sec: float = 5.0
     stall_timeout_sec: float = 120.0
+    kill_on_stall: bool = True
+    round_timeout_sec: Optional[float] = None
     max_rounds: int = 3
     tunable_params: List[TunableParam] = Field(default_factory=list)
     metric_specs: List[MetricSpec] = Field(default_factory=list)
@@ -103,6 +106,8 @@ class ProjectSpec(BaseModel):
             raise ValueError("heartbeat_interval_sec must be positive")
         if self.stall_timeout_sec <= 0:
             raise ValueError("stall_timeout_sec must be positive")
+        if self.round_timeout_sec is not None and self.round_timeout_sec <= 0:
+            raise ValueError("round_timeout_sec must be positive when set")
         if self.max_rounds <= 0:
             raise ValueError("max_rounds must be positive")
         return self
@@ -144,6 +149,34 @@ class ProjectContext(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class PromptPreview(BaseModel):
+    provider: str = "none"
+    model: str = ""
+    status: str = "preview"
+    system_prompt: str = ""
+    user_prompt: str = ""
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=utc_now)
+
+
+class PromptPreset(BaseModel):
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    project_root: str = ""
+    name: str
+    metric_prompt: str = ""
+    tuning_prompt: str = ""
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("preset name cannot be empty")
+        return normalized
+
+
 class AgentDecision(BaseModel):
     action: DecisionAction
     next_params: Dict[str, Any] = Field(default_factory=dict)
@@ -159,6 +192,9 @@ class RunSession(BaseModel):
     stop_reason: Optional[str] = None
     requested_stop: bool = False
     current_round: int = 0
+    resumed_from: Optional[int] = None
+    project_spec: Optional[ProjectSpec] = None
+    project_context: Optional[ProjectContext] = None
 
 
 class RoundRecord(BaseModel):
@@ -175,6 +211,7 @@ class RoundRecord(BaseModel):
     wandb_run_url: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
     agent_decision: Optional[AgentDecision] = None
+    prompt_preview: Optional[PromptPreview] = None
     error: Optional[str] = None
 
 

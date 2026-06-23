@@ -47,6 +47,190 @@ conda run -n trainer python {project_root}/train.py --config {project_root}/conf
 
 `{extra_args}` 由 runtime 根据 `tunable_params` 自动拼成 CLI 参数。agent 不会自由生成新的 shell 片段，只能覆盖白名单参数。
 
+## 全局 CLI 安装
+
+如果希望在任意目录直接使用 `trainee`，推荐用 `uv tool install` 做用户级全局安装：
+
+```bash
+cd /path/to/Trainee
+uv tool install --editable . --force
+uv tool update-shell
+```
+
+重启 shell 后验证：
+
+```bash
+trainee --help
+trainee serve --host 127.0.0.1 --port 8000
+```
+
+`--editable` 会让全局命令直接指向当前源码目录。后续修改或拉取代码后，通常不需要重新安装，`trainee` 会直接使用新代码。
+
+如果 shell 还找不到 `trainee`，临时加入 PATH：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+也可以直接使用完整路径：
+
+```bash
+$HOME/.local/bin/trainee --help
+```
+
+默认运行数据写入 `$HOME/.trainee`，包括 `runtime.sqlite3`、`artifacts/` 和 `config.json`。如果希望放到别的位置，可以设置 `TRAINEE_DATA_DIR`。
+
+## 项目初始化
+
+在目标训练项目目录执行：
+
+```bash
+cd ~/project/toymodel
+trainee init
+```
+
+`init` 是项目初始化动作，不启动 Web UI。它会像 agent 一样在终端输出本次读了哪些文件、写了哪些文件，例如：
+
+```text
+Trainee init
+- Project: /home/user/project/toymodel
+- Read: README.md
+- Read: train.py
+- Wrote: .trainee/project.json
+- Wrote: .trainee/context.md
+- Wrote: .trainee/README.md
+- Launcher: python {project_root}/train.py {extra_args}
+```
+
+项目内生成的 `.trainee/` 用来保存这个项目的初始化草稿和上下文说明：
+
+- `.trainee/project.json`: 可编辑的项目注册草稿。
+- `.trainee/context.md`: Trainee 读取项目代码后生成的项目理解。
+- `.trainee/README.md`: 本目录文件说明。
+
+如果文件已存在，`trainee init` 默认保留旧文件；需要重写时使用：
+
+```bash
+trainee init --force
+```
+
+普通 `trainee serve` 不绑定当前目录，只使用全局 runtime/settings。项目初始化只通过 `trainee init` 显式发生。`trainee launch` 暂时保留为兼容 alias。
+
+## 后续更新
+
+更新代码：
+
+```bash
+cd /path/to/Trainee
+git status
+git pull --ff-only origin main
+```
+
+如果只改了 Python 源码，editable 全局 CLI 会自动使用新代码。
+
+如果更新涉及依赖、`pyproject.toml`、命令入口或静态资源打包配置，重新安装一次全局 CLI：
+
+```bash
+cd /path/to/Trainee
+uv tool install --editable . --force
+```
+
+然后验证：
+
+```bash
+trainee --help
+```
+
+更新前如果有本地修改，先提交或暂存，避免 `git pull` 冲突：
+
+```bash
+git add .
+git commit -m "local changes"
+```
+
+或：
+
+```bash
+git stash push -u
+```
+
+## 工具式调用
+
+除了网页控制台，也可以把 Trainee 当作本地工具服务调用。先启动服务：
+
+```bash
+trainee serve
+```
+
+查看可用工具和 JSON Schema：
+
+```bash
+trainee tools
+```
+
+工具清单使用 OpenAI-style function schema 形状，工具名只包含字母、数字和下划线，方便直接交给 agent 编排。常用工具：
+
+- `project_register`
+- `project_get`
+- `loop_start`
+- `loop_get`
+- `loop_stop`
+- `runs_list`
+- `runs_get`
+- `prompt_preview`
+
+注册项目可以准备一个 `project.json`：
+
+```json
+{
+  "project_root": "/path/to/external-project",
+  "working_dir": "/path/to/external-project",
+  "launcher_template": "python {project_root}/train.py {extra_args}",
+  "data_paths": ["/path/to/external-project/data"],
+  "log_paths": ["/path/to/external-project/logs/*.log"],
+  "heartbeat_interval_sec": 5,
+  "stall_timeout_sec": 120,
+  "max_rounds": 3,
+  "tunable_params": [
+    {
+      "name": "lr",
+      "flag": "--lr",
+      "type": "float",
+      "default": 0.1,
+      "min_value": 0.001,
+      "max_value": 1.0
+    }
+  ],
+  "metric_specs": [
+    {
+      "name": "total_loss",
+      "source": "log_regex",
+      "key_or_pattern": "total_loss=(?P<value>-?\\d+(?:\\.\\d+)?)",
+      "goal": "min",
+      "required": true
+    }
+  ]
+}
+```
+
+然后按工具名调用：
+
+```bash
+trainee call project_register --input @project.json
+trainee call loop_start
+trainee call loop_get
+trainee call runs_list
+trainee call runs_get --input '{"run_id": 1}'
+```
+
+也可以通过 stdin 传入 JSON：
+
+```bash
+printf '%s\n' '{"run_id": 1}' | trainee call runs_get --input -
+```
+
+如果没有安装全局 CLI，把以上命令里的 `trainee` 替换为 `uv run trainee`。
+
 ## 配置字段
 
 - `project_root`: 外部训练项目根目录
@@ -96,30 +280,46 @@ conda run -n trainer python {project_root}/train.py --config {project_root}/conf
 ]
 ```
 
-## `.env` 与 LLM Provider
+## 全局配置与 LLM Provider
 
-启动时会自动读取仓库根目录下的 `.env`。未配置 LLM key 时，runtime 会自动回退到启发式调参。
+Trainee 的项目初始化目录和全局配置目录是分开的：
 
-OpenAI-compatible 示例：
+- 在训练项目目录执行 `trainee init`，例如 `cd ~/project/toymodel && trainee init`，Trainee 会读取当前目录并生成项目内 `.trainee/` 文件。
+- 普通 `trainee serve` 不读取当前目录，只打开全局 runtime/settings。
+- 全局运行数据默认放在 `~/.trainee`，包括 `runtime.sqlite3`、`artifacts/` 和 `config.json`。
+- Provider 设置优先从 `~/.trainee/config.json` 读取；环境变量仍然拥有最高优先级。
+- 项目目录下的 `.env` 继续作为兼容输入读取，但 Web UI 保存 provider 设置时只写 `~/.trainee/config.json`。
 
-```bash
-TRAINEE_LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o-mini
-TRAINEE_LLM_TIMEOUT_SEC=30
+未配置 LLM key 时，runtime 会自动回退到启发式调参。
+
+`~/.trainee/config.json` OpenAI-compatible 示例：
+
+```json
+{
+  "llm_provider": "openai",
+  "llm_timeout_sec": 30,
+  "openai": {
+    "api_key": "sk-...",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini"
+  }
+}
 ```
 
-Claude / Anthropic 示例：
+`~/.trainee/config.json` Claude / Anthropic 示例：
 
-```bash
-TRAINEE_LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_MODEL=claude-3-5-sonnet-latest
-ANTHROPIC_VERSION=2023-06-01
-ANTHROPIC_MAX_TOKENS=1024
-TRAINEE_LLM_TIMEOUT_SEC=30
+```json
+{
+  "llm_provider": "anthropic",
+  "llm_timeout_sec": 30,
+  "anthropic": {
+    "api_key": "sk-ant-...",
+    "base_url": "https://api.anthropic.com",
+    "model": "claude-3-5-sonnet-latest",
+    "version": "2023-06-01",
+    "max_tokens": 1024
+  }
+}
 ```
 
 如果不显式设置 `TRAINEE_LLM_PROVIDER`，runtime 会自动优先使用已存在的 key：

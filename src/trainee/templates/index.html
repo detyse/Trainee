@@ -27,12 +27,37 @@
         </div>
       </header>
 
-      <main class="dashboard-grid">
-        {% include "partials/project_section.html" %}
-        {% include "partials/context_section.html" %}
-        {% include "partials/loop_section.html" %}
-        {% include "partials/runs_section.html" %}
-        {% include "partials/run_detail_section.html" %}
+      <nav class="tabs" role="tablist" aria-label="Dashboard sections">
+        <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab-target="project">Project</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="prompt">Prompt</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="runtime">Runtime</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="runs">Runs</button>
+      </nav>
+
+      <main>
+        <section class="tab-panel active" role="tabpanel" data-tab-panel="project">
+          <div class="dashboard-grid">
+            {% include "partials/project_section.html" %}
+            {% include "partials/context_section.html" %}
+          </div>
+        </section>
+        <section class="tab-panel" role="tabpanel" data-tab-panel="prompt">
+          <div class="dashboard-grid">
+            {% include "partials/prompt_section.html" %}
+          </div>
+        </section>
+        <section class="tab-panel" role="tabpanel" data-tab-panel="runtime">
+          <div class="dashboard-grid">
+            {% include "partials/runtime_section.html" %}
+            {% include "partials/loop_section.html" %}
+          </div>
+        </section>
+        <section class="tab-panel" role="tabpanel" data-tab-panel="runs">
+          <div class="dashboard-grid">
+            {% include "partials/runs_section.html" %}
+            {% include "partials/run_detail_section.html" %}
+          </div>
+        </section>
       </main>
     </div>
 
@@ -48,12 +73,78 @@
         const selectedRun = document.body.dataset.selectedRun;
         await Promise.all([
           refreshSection("#loop-section", "/fragments/loop"),
+          refreshSection("#runtime-section", "/fragments/runtime"),
+          refreshSection(
+            "#prompt-section",
+            selectedRun ? `/fragments/prompt?run_id=${selectedRun}` : "/fragments/prompt"
+          ),
           refreshSection("#runs-section", "/fragments/runs"),
           refreshSection(
             "#run-detail-section",
             selectedRun ? `/fragments/run-detail?run_id=${selectedRun}` : "/fragments/run-detail"
           ),
         ]);
+      };
+
+      window.refreshPromptPreview = async () => {
+        const selectedRun = document.body.dataset.selectedRun;
+        await refreshSection(
+          "#prompt-section",
+          selectedRun ? `/fragments/prompt?run_id=${selectedRun}` : "/fragments/prompt"
+        );
+      };
+
+      window.switchTab = (tabId, updateHash = true) => {
+        document.querySelectorAll("[data-tab-panel]").forEach((panel) => {
+          panel.classList.toggle("active", panel.dataset.tabPanel === tabId);
+        });
+        document.querySelectorAll("[data-tab-target]").forEach((button) => {
+          const active = button.dataset.tabTarget === tabId;
+          button.classList.toggle("active", active);
+          button.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        if (updateHash) {
+          history.replaceState(null, "", `#${tabId}`);
+        }
+      };
+
+      document.querySelectorAll("[data-tab-target]").forEach((button) => {
+        button.addEventListener("click", () => window.switchTab(button.dataset.tabTarget));
+      });
+
+      const initialTab = location.hash.replace("#", "") || "project";
+      if (document.querySelector(`[data-tab-panel="${initialTab}"]`)) {
+        window.switchTab(initialTab, false);
+      }
+
+      window.runHealthCheck = async () => {
+        const output = document.getElementById("health-check-output");
+        const response = await fetch("/api/health");
+        const payload = await response.json();
+        if (output) {
+          output.textContent = JSON.stringify(payload, null, 2);
+        }
+        await refreshSection("#runtime-section", "/fragments/runtime");
+      };
+
+      window.applyPromptPreset = (select) => {
+        const dataNode = document.getElementById("prompt-presets-data");
+        if (!dataNode || !select.value) return;
+        let presets = [];
+        try {
+          presets = JSON.parse(dataNode.textContent || "[]");
+        } catch (error) {
+          console.error("Failed to parse prompt presets", error);
+          return;
+        }
+        const preset = presets.find((item) => item.id === select.value);
+        if (!preset) return;
+        const metricPrompt = document.getElementById("metric-prompt-input");
+        const tuningPrompt = document.getElementById("tuning-prompt-input");
+        const presetName = document.getElementById("prompt-preset-name-input");
+        if (metricPrompt) metricPrompt.value = preset.metric_prompt || "";
+        if (tuningPrompt) tuningPrompt.value = preset.tuning_prompt || "";
+        if (presetName) presetName.value = preset.name || "";
       };
 
       if (window.EventSource) {

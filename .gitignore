@@ -1,5 +1,14 @@
+.qoder
+.codex
+.agents
+
 .trainee/
 __pycache__/
 *.py[cod]
+build/
+dist/
 *.egg-info/
 .pytest_cache/
+
+/_docs
+/tests

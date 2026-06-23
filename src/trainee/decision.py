@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from trainee.models import AgentDecision, ProjectContext, ProjectSpec, RoundRecord
+from trainee.models import AgentDecision, ProjectContext, ProjectSpec, PromptPreview, RoundRecord
 from trainee.settings import Settings
+
+
+@dataclass
+class DecisionResult:
+    decision: AgentDecision
+    prompt_preview: Optional[PromptPreview] = None
 
 
 class DecisionEngine:
@@ -20,15 +27,27 @@ class DecisionEngine:
         history: List[RoundRecord],
         current_params: Dict[str, Any],
     ) -> AgentDecision:
+        result = await self.decide_with_prompt(spec, context, history, current_params)
+        return result.decision
+
+    async def decide_with_prompt(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> DecisionResult:
         if not spec.tunable_params:
-            return AgentDecision(
-                action="stop",
-                next_params=current_params,
-                reason="No tunable_params are configured, so the loop stops after collecting the latest result.",
-                focus_metrics=self._focus_metrics(spec),
+            return DecisionResult(
+                decision=AgentDecision(
+                    action="stop",
+                    next_params=current_params,
+                    reason="No tunable_params are configured, so the loop stops after collecting the latest result.",
+                    focus_metrics=self._focus_metrics(spec),
+                )
             )
 
-        decision = await self._provider_decision(spec, context, history, current_params)
+        decision, prompt_preview = await self._provider_decision(spec, context, history, current_params)
         if decision is not None:
             try:
                 normalized = spec.merge_param_values(decision.next_params, base=current_params)
@@ -36,9 +55,15 @@ class DecisionEngine:
                 pass
             else:
                 decision.next_params = normalized
-                return decision
+                return DecisionResult(decision=decision, prompt_preview=prompt_preview)
 
-        return self._heuristic_decision(spec, history, current_params)
+        if prompt_preview is None:
+            prompt_preview = self.build_prompt_preview(spec, context, history, current_params, status="not_sent")
+
+        return DecisionResult(
+            decision=self._heuristic_decision(spec, history, current_params),
+            prompt_preview=prompt_preview,
+        )
 
     async def _provider_decision(
         self,
@@ -46,12 +71,12 @@ class DecisionEngine:
         context: ProjectContext,
         history: List[RoundRecord],
         current_params: Dict[str, Any],
-    ) -> Optional[AgentDecision]:
+    ) -> Tuple[Optional[AgentDecision], Optional[PromptPreview]]:
         if self.settings.llm_provider == "openai" and self.settings.openai_api_key:
             return await self._openai_decision(spec, context, history, current_params)
         if self.settings.llm_provider == "anthropic" and self.settings.anthropic_api_key:
             return await self._anthropic_decision(spec, context, history, current_params)
-        return None
+        return None, None
 
     async def _openai_decision(
         self,
@@ -64,9 +89,9 @@ class DecisionEngine:
         try:
             content = await self._openai_complete(self._system_prompt(), prompt)
             candidate = self._extract_json(content)
-            return AgentDecision.model_validate(candidate)
+            return AgentDecision.model_validate(candidate), prompt_preview
         except Exception:
-            return None
+            return None, prompt_preview.model_copy(update={"status": "provider_failed"})
 
     async def _anthropic_decision(
         self,
