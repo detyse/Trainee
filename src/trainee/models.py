@@ -15,6 +15,7 @@ ParamType = Literal["int", "float", "str", "bool"]
 MetricSource = Literal["log_regex", "wandb_summary"]
 MetricGoal = Literal["min", "max"]
 DecisionAction = Literal["continue", "stop"]
+SecurityMode = Literal["guarded", "unsafe"]
 
 
 class TunableParam(BaseModel):
@@ -87,6 +88,7 @@ class ProjectSpec(BaseModel):
     project_root: str
     working_dir: str
     launcher_template: str
+    security_mode: SecurityMode = "guarded"
     data_paths: List[str] = Field(default_factory=list)
     log_paths: List[str] = Field(default_factory=list)
     wandb_enabled: bool = False

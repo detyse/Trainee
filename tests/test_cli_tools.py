@@ -58,6 +58,8 @@ def test_init_project_initializes_project_files(tmp_path):
     assert project_json["project_root"] == str(project)
     assert project_json["working_dir"] == str(project)
     assert project_json["launcher_template"] == "python {project_root}/train.py {extra_args}"
+    assert project_json["security_mode"] == "guarded"
+    assert project_json["log_paths"] == [".trainee/logs/**/*.log", ".trainee/runs/**/*.log"]
     assert "Toy Model" in context_md
     assert trainee_dir / "project.json" in result["files_written"]
     assert project / "README.md" in result["files_read"]
@@ -89,3 +91,24 @@ def test_launch_alias_still_initializes_project(tmp_path, capsys):
     assert exit_code == 0
     assert "Trainee init" in output
     assert (project / ".trainee" / "project.json").exists()
+
+
+def test_run_command_executes_project_config_unsafe(tmp_path, capsys):
+    project = tmp_path / "toymodel"
+    project.mkdir()
+    (project / "train.py").write_text("print('total_loss=0.5')\n", encoding="utf-8")
+
+    assert main(["init", str(project)]) == 0
+    project_json_path = project / ".trainee" / "project.json"
+    project_json = json.loads(project_json_path.read_text(encoding="utf-8"))
+    project_json["max_rounds"] = 1
+    project_json_path.write_text(json.dumps(project_json), encoding="utf-8")
+
+    exit_code = main(["run", str(project), "--unsafe"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Trainee run" in output
+    assert "- Security: unsafe" in output
+    assert "- Status: stopped" in output
+    assert (project / ".trainee" / "runtime.sqlite3").exists()

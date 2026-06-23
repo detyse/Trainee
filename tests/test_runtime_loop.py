@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+
+import pytest
+
 from trainee.executor import TrainingExecutor
 from trainee.models import ProjectSpec
 
 REGISTER_PAYLOAD_TEMPLATE = {
+    "security_mode": "unsafe",
     "heartbeat_interval_sec": 0.1,
     "stall_timeout_sec": 1.5,
     "max_rounds": 2,
@@ -100,6 +106,47 @@ def test_loop_runs_two_rounds_and_collects_metrics(runtime_env, wait_for):
     assert report.status_code == 200
     assert "Trainee Session Report" in report.text
     assert (runtime_env["data_dir"] / "artifacts" / f"session-{session_id:04d}" / "report.md").exists()
+
+
+def test_guarded_loop_writes_logs_under_trainee(runtime_env, wait_for):
+    _skip_without_working_bwrap()
+    client = runtime_env["client"]
+    external_project = runtime_env["external_project"]
+    python = runtime_env["python"]
+
+    log_file = external_project / ".trainee" / "logs" / "guarded.log"
+    register_payload = REGISTER_PAYLOAD_TEMPLATE | {
+        "security_mode": "guarded",
+        "project_root": str(external_project),
+        "working_dir": str(external_project),
+        "launcher_template": f"{python} {{project_root}}/train.py --log-file {log_file} {{extra_args}}",
+        "data_paths": [str(external_project / "data")],
+        "log_paths": [str(external_project / ".trainee" / "logs" / "*.log")],
+        "max_rounds": 1,
+    }
+
+    response = client.post("/api/project/register", json=register_payload)
+    assert response.status_code == 200, response.text
+    assert client.post("/api/loop/start").status_code == 200
+
+    wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
+    runs_payload = client.get("/api/runs").json()
+    assert runs_payload["rounds"][0]["status"] == "completed"
+    assert log_file.exists()
+
+
+def _skip_without_working_bwrap() -> None:
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        pytest.skip("bubblewrap is not installed")
+    result = subprocess.run(
+        [bwrap, "--ro-bind", "/", "/", "--proc", "/proc", "/bin/true"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"bubblewrap unavailable in this environment: {result.stderr.strip()}")
 
 
 def test_stalled_round_marks_failed_session(runtime_env, wait_for):

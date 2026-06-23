@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from trainee.models import ProjectSpec, utc_now
 from trainee.parsers import extract_wandb_url
+from trainee.security import build_secure_command, project_trainee_dir
 
 
 HeartbeatReporter = Callable[[Dict[str, Any]], Awaitable[None]]
@@ -51,13 +52,18 @@ class TrainingExecutor:
         resolved_command = self.render_command(spec, param_values)
         working_dir = Path(spec.working_dir).expanduser().resolve()
         external_log_paths = self.resolve_log_paths(spec)
+        secure_command = build_secure_command(
+            project_root=Path(spec.project_root),
+            working_dir=working_dir,
+            command=resolved_command,
+            security_mode=spec.security_mode,
+        )
 
         state = _ExecutionState()
         process = await asyncio.create_subprocess_exec(
-            "/bin/bash",
-            "-lc",
-            resolved_command,
-            cwd=str(working_dir),
+            *secure_command.argv,
+            cwd=str(secure_command.cwd) if secure_command.cwd is not None else None,
+            env=secure_command.env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
@@ -177,6 +183,7 @@ class TrainingExecutor:
         template_vars = {
             "project_root": shlex.quote(str(Path(spec.project_root).expanduser().resolve())),
             "working_dir": shlex.quote(str(Path(spec.working_dir).expanduser().resolve())),
+            "trainee_dir": shlex.quote(str(project_trainee_dir(Path(spec.project_root)))),
             "extra_args": extra_args,
         }
         if "{extra_args}" in spec.launcher_template:
@@ -215,6 +222,8 @@ class TrainingExecutor:
             for raw_path in raw_paths:
                 candidate = self._configured_path(raw_path, working_dir)
                 self._ensure_within(candidate, project_root, field_name)
+                if spec.security_mode == "guarded" and field_name == "log_paths":
+                    self._ensure_within(candidate, project_trainee_dir(project_root), "log_paths")
 
     def _configured_path(self, raw_path: str, working_dir: Path) -> Path:
         path = Path(raw_path).expanduser()

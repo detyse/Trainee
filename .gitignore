@@ -1,6 +1,7 @@
 .qoder
 .venv
 .codex
+.agents
 
 .trainee/
 __pycache__/

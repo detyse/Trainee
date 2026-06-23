@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from dataclasses import dataclass
@@ -12,7 +13,11 @@ import httpx
 import uvicorn
 
 from trainee.context_builder import ContextBuilder
+from trainee.events import EventBus
 from trainee.models import ProjectContext, ProjectSpec, PromptPreset
+from trainee.orchestrator import RuntimeService
+from trainee.settings import load_settings
+from trainee.storage import Storage
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -178,6 +183,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_init_result(result)
         return 0
 
+    if command == "run":
+        try:
+            security_mode = "unsafe" if args.unsafe else "guarded"
+            result = asyncio.run(run_project(Path(args.project_root), security_mode=security_mode))
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        _print_run_result(result)
+        return 0 if result["status"] != "failed" else 1
+
     if command == "call":
         try:
             payload = load_tool_input(args.input)
@@ -286,6 +301,7 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
         project_root=str(project_root),
         working_dir=str(project_root),
         launcher_template=_default_launcher_template(project_root),
+        log_paths=[".trainee/logs/**/*.log", ".trainee/runs/**/*.log"],
     )
     context = ContextBuilder().build(spec)
     files_read = _launch_read_targets(project_root)
@@ -319,6 +335,41 @@ def launch_project(project_root: Path, force: bool = False) -> dict[str, Any]:
     return init_project(project_root, force=force)
 
 
+async def run_project(project_root: Path, security_mode: str = "guarded") -> dict[str, Any]:
+    project_root = project_root.expanduser().resolve()
+    spec_path = project_root / ".trainee" / "project.json"
+    if not spec_path.is_file():
+        raise ValueError(f"project config not found: {spec_path}; run `trainee init` first")
+
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{spec_path} must contain a JSON object")
+    spec = ProjectSpec.model_validate(payload).model_copy(update={"security_mode": security_mode})
+
+    trainee_dir = project_root / ".trainee"
+    settings = load_settings(repo_root=project_root, data_dir=trainee_dir, project_root=project_root)
+    storage = Storage(settings.database_path)
+    runtime = RuntimeService(settings, storage, EventBus())
+    try:
+        await runtime.register_project(spec)
+        snapshot = await runtime.start_loop()
+        while runtime.loop_is_running():
+            await asyncio.sleep(0.2)
+            snapshot = storage.get_loop_snapshot()
+        session = storage.get_latest_session()
+        return {
+            "project_root": project_root,
+            "data_dir": settings.data_dir,
+            "artifacts_dir": settings.artifacts_dir,
+            "session_id": session.id if session else snapshot.current_session_id,
+            "status": session.status if session else snapshot.status,
+            "message": session.stop_reason if session and session.stop_reason else snapshot.message,
+            "security_mode": spec.security_mode,
+        }
+    finally:
+        storage.close()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Trainee agent runtime.")
     subparsers = parser.add_subparsers(dest="command")
@@ -337,6 +388,13 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     init_parser.add_argument("--force", action="store_true", help="Overwrite existing files under .trainee.")
     init_parser.set_defaults(command="init")
+
+    run_parser = subparsers.add_parser("run", help="Run the training loop from .trainee/project.json.")
+    run_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
+    security_group = run_parser.add_mutually_exclusive_group()
+    security_group.add_argument("--guarded", action="store_true", help="Run with the default bubblewrap sandbox.")
+    security_group.add_argument("--unsafe", action="store_true", help="Run without bubblewrap isolation.")
+    run_parser.set_defaults(command="run")
 
     tools_parser = subparsers.add_parser("tools", help="Print tool-call compatible function schemas.")
     tools_parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Base URL to include in the manifest.")
@@ -405,6 +463,19 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
         print(f"- Warning: {warning}")
 
 
+def _print_run_result(result: Mapping[str, Any]) -> None:
+    print("Trainee run")
+    print(f"- Project: {result['project_root']}")
+    print(f"- Security: {result['security_mode']}")
+    print(f"- Data: {result['data_dir']}")
+    print(f"- Artifacts: {result['artifacts_dir']}")
+    if result["session_id"] is not None:
+        print(f"- Session: {result['session_id']}")
+    print(f"- Status: {result['status']}")
+    if result["message"]:
+        print(f"- Message: {result['message']}")
+
+
 def _default_launcher_template(project_root: Path) -> str:
     for relative_path in ("train.py", "main.py", "run.py"):
         if (project_root / relative_path).is_file():
@@ -454,8 +525,10 @@ def _render_launch_readme(project_root: Path) -> str:
             "",
             "- `project.json`: editable project registration draft.",
             "- `context.md`: generated project understanding for review.",
+            "- `logs/`, `runs/`, and `artifacts/`: writable runtime outputs for guarded runs.",
             "",
-            "Global provider settings remain in `~/.trainee/config.json`.",
+            "Launcher template variables: `{project_root}`, `{working_dir}`, `{trainee_dir}`, `{extra_args}`.",
+            "Guarded runs make the host filesystem read-only and keep writes inside this `.trainee/` directory.",
             "",
         ]
     )

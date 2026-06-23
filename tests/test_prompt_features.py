@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 REGISTER_PAYLOAD_TEMPLATE = {
+    "security_mode": "unsafe",
     "heartbeat_interval_sec": 0.1,
     "stall_timeout_sec": 1.5,
     "max_rounds": 2,
@@ -30,6 +31,7 @@ def _project_form(payload: dict[str, object]) -> dict[str, object]:
         "project_root": payload["project_root"],
         "working_dir": payload["working_dir"],
         "launcher_template": payload["launcher_template"],
+        "security_mode": payload.get("security_mode", "guarded"),
         "data_paths_json": json.dumps(payload.get("data_paths", [])),
         "log_paths_json": json.dumps(payload.get("log_paths", [])),
         "wandb_enabled": "on" if payload.get("wandb_enabled") else "",

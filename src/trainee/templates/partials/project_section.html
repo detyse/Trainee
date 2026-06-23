@@ -30,6 +30,14 @@
       <textarea name="launcher_template" rows="3" placeholder="conda run -n trainer python {project_root}/train.py {extra_args}">{{ spec.launcher_template if spec else runtime_settings.launch_launcher_template }}</textarea>
     </label>
 
+    <label>
+      <span>Security mode</span>
+      <select name="security_mode">
+        <option value="guarded" {% if not spec or spec.security_mode == "guarded" %}selected{% endif %}>Guarded</option>
+        <option value="unsafe" {% if spec and spec.security_mode == "unsafe" %}selected{% endif %}>Unsafe</option>
+      </select>
+    </label>
+
     <div class="two-col">
       <label>
         <span>Data paths JSON</span>

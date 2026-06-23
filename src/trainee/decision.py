@@ -84,8 +84,9 @@ class DecisionEngine:
         context: ProjectContext,
         history: List[RoundRecord],
         current_params: Dict[str, Any],
-    ) -> Optional[AgentDecision]:
+    ) -> Tuple[Optional[AgentDecision], Optional[PromptPreview]]:
         prompt = self._build_prompt(spec, context, history, current_params)
+        prompt_preview = self.build_prompt_preview(spec, context, history, current_params, status="sent")
         try:
             content = await self._openai_complete(self._system_prompt(), prompt)
             candidate = self._extract_json(content)
@@ -99,14 +100,15 @@ class DecisionEngine:
         context: ProjectContext,
         history: List[RoundRecord],
         current_params: Dict[str, Any],
-    ) -> Optional[AgentDecision]:
+    ) -> Tuple[Optional[AgentDecision], Optional[PromptPreview]]:
         prompt = self._build_prompt(spec, context, history, current_params)
+        prompt_preview = self.build_prompt_preview(spec, context, history, current_params, status="sent")
         try:
             content = await self._anthropic_complete(self._system_prompt(), prompt)
             candidate = self._extract_json(content)
-            return AgentDecision.model_validate(candidate)
+            return AgentDecision.model_validate(candidate), prompt_preview
         except Exception:
-            return None
+            return None, prompt_preview.model_copy(update={"status": "provider_failed"})
 
     async def probe(self, prompt: str, image: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         prompt = prompt.strip()
@@ -315,6 +317,68 @@ class DecisionEngine:
         if spec.metric_specs:
             return [item.name for item in spec.metric_specs]
         return ["loss", "total_loss"]
+
+    def build_prompt_preview(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+        status: str = "preview",
+    ) -> PromptPreview:
+        system_prompt = self._system_prompt()
+        user_prompt = self._build_prompt(spec, context, history, current_params)
+        provider = self.settings.llm_provider
+        model = "none"
+        payload: Dict[str, Any] = {"system": system_prompt, "user": user_prompt}
+        if provider == "openai":
+            model = self.settings.openai_model
+            payload = self._openai_payload(system_prompt, user_prompt)
+        elif provider == "anthropic":
+            model = self.settings.anthropic_model
+            payload = self._anthropic_payload(system_prompt, user_prompt)
+        return PromptPreview(
+            provider=provider,
+            model=model,
+            status=status,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            payload=payload,
+        )
+
+    def _openai_payload(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "model": self.settings.openai_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._openai_user_content(user_prompt, image)},
+            ],
+            "temperature": 0.2,
+        }
+
+    def _anthropic_payload(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "model": self.settings.anthropic_model,
+            "max_tokens": self.settings.anthropic_max_tokens,
+            "system": system_prompt,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": self._anthropic_user_content(user_prompt, image),
+                }
+            ],
+            "temperature": 0.2,
+        }
 
     def _build_prompt(
         self,

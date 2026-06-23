@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import json
 import time
 from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData
@@ -22,6 +23,7 @@ from trainee.settings import Settings, load_settings, save_provider_config
 from trainee.storage import Storage
 
 MAX_LLM_TEST_IMAGE_BYTES = 5 * 1024 * 1024
+logger = get_logger(__name__)
 
 
 def build_app(settings: Optional[Settings] = None) -> FastAPI:                  # turn fastapi
@@ -69,7 +71,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     async def index(request: Request, run_id: Optional[int] = None) -> HTMLResponse:
         runtime = get_runtime(request)
         payload = runtime.dashboard_payload(selected_run_id=run_id)
-        return templates.TemplateResponse(request, "index.html", {"request": request, **payload})
+        return templates.TemplateResponse(request, "index.html", {"request": request, **payload, "health": _health_payload(request)})
 
     @app.get("/llm-test", response_class=HTMLResponse)
     async def llm_test(request: Request) -> HTMLResponse:
@@ -295,6 +297,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         project_root: str = Form(...),
         working_dir: str = Form(...),
         launcher_template: str = Form(...),
+        security_mode: str = Form("guarded"),
         data_paths_json: str = Form("[]"),
         log_paths_json: str = Form("[]"),
         wandb_enabled: Optional[str] = Form(None),
@@ -312,6 +315,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 project_root=project_root,
                 working_dir=working_dir,
                 launcher_template=launcher_template,
+                security_mode=security_mode,
                 data_paths_json=data_paths_json,
                 log_paths_json=log_paths_json,
                 wandb_enabled=wandb_enabled is not None,
@@ -510,6 +514,7 @@ def _project_spec_from_values(
     project_root: str,
     working_dir: str,
     launcher_template: str,
+    security_mode: str,
     data_paths_json: str,
     log_paths_json: str,
     wandb_enabled: bool,
@@ -525,6 +530,7 @@ def _project_spec_from_values(
         project_root=project_root,
         working_dir=working_dir,
         launcher_template=launcher_template,
+        security_mode=security_mode,
         data_paths=_parse_json_field(data_paths_json, "data_paths_json"),
         log_paths=_parse_json_field(log_paths_json, "log_paths_json"),
         wandb_enabled=wandb_enabled,
@@ -543,6 +549,7 @@ def _project_spec_from_form(form: FormData) -> ProjectSpec:
         project_root=_form_str(form, "project_root"),
         working_dir=_form_str(form, "working_dir"),
         launcher_template=_form_str(form, "launcher_template"),
+        security_mode=_form_str(form, "security_mode", "guarded"),
         data_paths_json=_form_str(form, "data_paths_json", "[]"),
         log_paths_json=_form_str(form, "log_paths_json", "[]"),
         wandb_enabled=_form_checkbox(form, "wandb_enabled"),

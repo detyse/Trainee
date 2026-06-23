@@ -7,6 +7,7 @@ Trainee 是一个面向训练自动化的 agent runtime。它不承载训练代�
 - 注册一个本机外部训练项目，并保存项目根目录、工作目录、启动命令模板、数据路径、日志路径、可调参数和指标规则。
 - 自动扫描外部项目，生成 `ProjectContext`，把“项目是什么、数据在哪、训练入口在哪、参数怎么调、结果怎么看”固化进上下文。
 - 使用显式 launcher 执行训练，例如 `conda run ... python train.py ...` 或 `/path/to/train.sh ...`。
+- 默认用 bubblewrap 进行 guarded run：宿主文件系统只读，只有项目内 `.trainee/` 可写。
 - 通过本地子进程输出和日志更新时间做 heartbeat 检测；超过阈值则标记 stalled。
 - 解析日志里的 `loss/total_loss`，并支持按配置从正则或 W&B summary 中抽取更多指标。
 - 通过轻量控制台查看项目信息、loop 状态、轮次历史、命令、参数、日志路径、W&B 链接和 agent 决策。
@@ -114,6 +115,29 @@ Trainee init
 trainee init --force
 ```
 
+生成的 `project.json` 默认 `security_mode` 为 `guarded`，默认 `log_paths` 指向 `.trainee/logs/**/*.log` 和 `.trainee/runs/**/*.log`。Launcher 模板可用变量：
+
+- `{project_root}`
+- `{working_dir}`
+- `{trainee_dir}`
+- `{extra_args}`
+
+## 项目运行
+
+在目标训练项目目录执行：
+
+```bash
+trainee run
+```
+
+`trainee run` 会读取 `.trainee/project.json`，使用项目本地 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/`，启动 loop 并在当前终端等待完成。默认 guarded 模式要求系统安装 `bubblewrap`/`bwrap`；如果没有 `bwrap`，运行会失败并提示安装。
+
+训练子进程在 guarded 模式下只能写项目 `.trainee/`，并会把 `HOME`、`XDG_CACHE_HOME`、`WANDB_DIR`、`HF_HOME`、`TORCH_HOME`、`MPLCONFIGDIR` 重定向到 `.trainee/` 下。需要临时绕过 sandbox 时显式使用：
+
+```bash
+trainee run --unsafe
+```
+
 普通 `trainee serve` 不绑定当前目录，只使用全局 runtime/settings。项目初始化只通过 `trainee init` 显式发生。`trainee launch` 暂时保留为兼容 alias。
 
 ## 后续更新
@@ -186,8 +210,9 @@ trainee tools
   "project_root": "/path/to/external-project",
   "working_dir": "/path/to/external-project",
   "launcher_template": "python {project_root}/train.py {extra_args}",
+  "security_mode": "guarded",
   "data_paths": ["/path/to/external-project/data"],
-  "log_paths": ["/path/to/external-project/logs/*.log"],
+  "log_paths": ["/path/to/external-project/.trainee/logs/*.log"],
   "heartbeat_interval_sec": 5,
   "stall_timeout_sec": 120,
   "max_rounds": 3,
@@ -236,6 +261,7 @@ printf '%s\n' '{"run_id": 1}' | trainee call runs_get --input -
 - `project_root`: 外部训练项目根目录
 - `working_dir`: 训练命令实际执行目录
 - `launcher_template`: 完整启动命令模板
+- `security_mode`: `guarded` 或 `unsafe`，默认 `guarded`
 - `data_paths`: 数据路径列表，JSON 数组
 - `log_paths`: 外部日志路径或 glob 列表，JSON 数组
 - `tunable_params`: 可调参数白名单，JSON 数组
