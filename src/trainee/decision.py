@@ -61,21 +61,8 @@ class DecisionEngine:
         current_params: Dict[str, Any],
     ) -> Optional[AgentDecision]:
         prompt = self._build_prompt(spec, context, history, current_params)
-        payload = {
-            "model": self.settings.openai_model,
-            "messages": [
-                {"role": "system", "content": self._system_prompt()},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-        }
-        url = self.settings.openai_base_url.rstrip("/") + "/chat/completions"
-        headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
         try:
-            async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"]
+            content = await self._openai_complete(self._system_prompt(), prompt)
             candidate = self._extract_json(content)
             return AgentDecision.model_validate(candidate)
         except Exception:
@@ -89,14 +76,77 @@ class DecisionEngine:
         current_params: Dict[str, Any],
     ) -> Optional[AgentDecision]:
         prompt = self._build_prompt(spec, context, history, current_params)
+        try:
+            content = await self._anthropic_complete(self._system_prompt(), prompt)
+            candidate = self._extract_json(content)
+            return AgentDecision.model_validate(candidate)
+        except Exception:
+            return None
+
+    async def probe(self, prompt: str, image: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("prompt is required")
+
+        if self.settings.llm_provider == "openai":
+            if not self.settings.openai_api_key:
+                raise ValueError("OPENAI_API_KEY is not configured")
+            content = await self._openai_complete(self._probe_system_prompt(), prompt, image=image)
+            return {
+                "provider": "openai",
+                "model": self.settings.openai_model,
+                "has_image": image is not None,
+                "content": content,
+            }
+
+        if self.settings.llm_provider == "anthropic":
+            if not self.settings.anthropic_api_key:
+                raise ValueError("ANTHROPIC_API_KEY is not configured")
+            content = await self._anthropic_complete(self._probe_system_prompt(), prompt, image=image)
+            return {
+                "provider": "anthropic",
+                "model": self.settings.anthropic_model,
+                "has_image": image is not None,
+                "content": content,
+            }
+
+        raise ValueError("LLM provider is disabled")
+
+    async def _openai_complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image: Optional[Dict[str, str]] = None,
+    ) -> str:
+        payload = {
+            "model": self.settings.openai_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._openai_user_content(user_prompt, image)},
+            ],
+            "temperature": 0.2,
+        }
+        url = self.settings.openai_base_url.rstrip("/") + "/chat/completions"
+        headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
+        async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+
+    async def _anthropic_complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image: Optional[Dict[str, str]] = None,
+    ) -> str:
         payload = {
             "model": self.settings.anthropic_model,
             "max_tokens": self.settings.anthropic_max_tokens,
-            "system": self._system_prompt(),
+            "system": system_prompt,
             "messages": [
                 {
                     "role": "user",
-                    "content": prompt,
+                    "content": self._anthropic_user_content(user_prompt, image),
                 }
             ],
             "temperature": 0.2,
@@ -107,21 +157,44 @@ class DecisionEngine:
             "anthropic-version": self.settings.anthropic_version,
             "content-type": "application/json",
         }
-        try:
-            async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                body = response.json()
-                text_parts = [
-                    block.get("text", "")
-                    for block in body.get("content", [])
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                content = "\n".join(part for part in text_parts if part)
-            candidate = self._extract_json(content)
-            return AgentDecision.model_validate(candidate)
-        except Exception:
-            return None
+        async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            body = response.json()
+            text_parts = [
+                block.get("text", "")
+                for block in body.get("content", [])
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            return "\n".join(part for part in text_parts if part)
+
+    def _openai_user_content(self, prompt: str, image: Optional[Dict[str, str]]) -> Any:
+        if image is None:
+            return prompt
+        return [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image['media_type']};base64,{image['data']}",
+                },
+            },
+        ]
+
+    def _anthropic_user_content(self, prompt: str, image: Optional[Dict[str, str]]) -> Any:
+        if image is None:
+            return prompt
+        return [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image["media_type"],
+                    "data": image["data"],
+                },
+            },
+        ]
 
     def _system_prompt(self) -> str:
         return (
@@ -130,6 +203,9 @@ class DecisionEngine:
             "\"reason\":\"...\",\"focus_metrics\":[\"...\"]}. "
             "Only touch whitelisted tunable params."
         )
+
+    def _probe_system_prompt(self) -> str:
+        return "You are a concise API test assistant. Answer the user's prompt directly."
 
     def _heuristic_decision(
         self,

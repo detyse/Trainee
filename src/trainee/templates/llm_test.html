@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM API Test / Trainee</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Agent Runtime / API Test</p>
+          <h1>LLM API Test</h1>
+          <p class="lede">Send a prompt with an optional image through the configured provider.</p>
+        </div>
+        <div class="hero-status">
+          <span class="status-pill status-{{ 'ready' if configured else 'failed' }}">{{ provider }}</span>
+          <p>{{ model }}</p>
+          <div class="hero-actions">
+            <a class="nav-button" href="/">Dashboard</a>
+          </div>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="panel panel-full">
+          <div class="panel-header">
+            <div>
+              <p class="panel-kicker">Request</p>
+              <h2>Probe Provider</h2>
+            </div>
+            <span class="muted">Image max {{ max_image_mb }}MB</span>
+          </div>
+
+          <form id="llm-test-form" class="stacked-form" enctype="multipart/form-data">
+            <label>
+              <span>Prompt</span>
+              <textarea name="prompt" rows="5" required>Describe the image if one is attached. Otherwise, reply with a short API connectivity message.</textarea>
+            </label>
+            <label>
+              <span>Image</span>
+              <input type="file" name="image" accept="image/*" />
+            </label>
+            <div class="actions">
+              <button class="primary" type="submit" {% if not configured %}disabled{% endif %}>Run Test</button>
+              <button class="secondary" type="reset">Clear</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel panel-full">
+          <div class="panel-header">
+            <div>
+              <p class="panel-kicker">Response</p>
+              <h2>Result</h2>
+            </div>
+          </div>
+          <pre id="llm-test-result">{{ "Provider is not configured." if not configured else "Ready." }}</pre>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const form = document.querySelector("#llm-test-form");
+      const result = document.querySelector("#llm-test-result");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = form.querySelector("button[type='submit']");
+        button.disabled = true;
+        result.textContent = "Running...";
+
+        try {
+          const response = await fetch("/api/llm/test", {
+            method: "POST",
+            body: new FormData(form),
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.detail || "Request failed");
+          }
+          result.textContent = JSON.stringify(payload, null, 2);
+        } catch (error) {
+          result.textContent = JSON.stringify({ error: error.message }, null, 2);
+        } finally {
+          button.disabled = {{ "false" if configured else "true" }};
+        }
+      });
+
+      form.addEventListener("reset", () => {
+        result.textContent = {{ '"Ready."' if configured else '"Provider is not configured."' }};
+      });
+    </script>
+  </body>
+</html>

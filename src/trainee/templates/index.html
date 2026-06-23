@@ -21,6 +21,9 @@
         <div class="hero-status">
           <span class="status-pill status-{{ loop.status|replace('_', '-') }}">{{ loop.status }}</span>
           <p>{{ loop.message or "No active project registered." }}</p>
+          <div class="hero-actions">
+            <a class="nav-button" href="/llm-test">LLM API Test</a>
+          </div>
         </div>
       </header>
 

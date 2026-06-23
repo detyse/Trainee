@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -16,10 +17,12 @@ from trainee.orchestrator import RuntimeService
 from trainee.settings import Settings, load_settings
 from trainee.storage import Storage
 
+MAX_LLM_TEST_IMAGE_BYTES = 5 * 1024 * 1024
 
-def build_app(settings: Optional[Settings] = None) -> FastAPI:
+
+def build_app(settings: Optional[Settings] = None) -> FastAPI:                  # turn fastapi
     app_settings = settings or load_settings()
-    templates = Jinja2Templates(directory=str(app_settings.template_dir))
+    templates = Jinja2Templates(directory=str(app_settings.template_dir))       # 
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -45,6 +48,27 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:
         runtime = get_runtime(request)
         payload = runtime.dashboard_payload(selected_run_id=run_id)
         return templates.TemplateResponse(request, "index.html", {"request": request, **payload})
+
+    @app.get("/llm-test", response_class=HTMLResponse)
+    async def llm_test(request: Request) -> HTMLResponse:
+        settings = request.app.state.settings
+        model = _llm_display_model(settings)
+        configured = (
+            settings.llm_provider == "openai" and bool(settings.openai_api_key)
+        ) or (
+            settings.llm_provider == "anthropic" and bool(settings.anthropic_api_key)
+        )
+        return templates.TemplateResponse(
+            request,
+            "llm_test.html",
+            {
+                "request": request,
+                "provider": settings.llm_provider,
+                "model": model,
+                "configured": configured,
+                "max_image_mb": MAX_LLM_TEST_IMAGE_BYTES // (1024 * 1024),
+            },
+        )
 
     @app.get("/fragments/project", response_class=HTMLResponse)
     async def project_fragment(request: Request) -> HTMLResponse:
@@ -155,6 +179,22 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    @app.post("/api/llm/test")
+    async def api_llm_test(
+        request: Request,
+        prompt: str = Form(...),
+        image: Optional[UploadFile] = File(None),
+    ) -> JSONResponse:
+        runtime = get_runtime(request)
+        try:
+            image_payload = await _read_llm_test_image(image)
+            result = await runtime.decision_engine.probe(prompt, image=image_payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return JSONResponse(result)
+
     @app.post("/ui/project/register")
     async def ui_register_project(
         request: Request,
@@ -247,6 +287,34 @@ def _parse_json_field(raw: str, field_name: str) -> Any:
 
 def _format_sse(event_name: str, payload: Dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _llm_display_model(settings: Settings) -> str:
+    if settings.llm_provider == "openai":
+        return settings.openai_model
+    if settings.llm_provider == "anthropic":
+        return settings.anthropic_model
+    return "none"
+
+
+async def _read_llm_test_image(image: Optional[UploadFile]) -> Optional[Dict[str, str]]:
+    if image is None or not image.filename:
+        return None
+
+    media_type = image.content_type or "application/octet-stream"
+    if not media_type.startswith("image/"):
+        raise ValueError("image must be an image file")
+
+    raw = await image.read()
+    if len(raw) > MAX_LLM_TEST_IMAGE_BYTES:
+        raise ValueError(f"image must be {MAX_LLM_TEST_IMAGE_BYTES // (1024 * 1024)}MB or smaller")
+    if not raw:
+        raise ValueError("image is empty")
+
+    return {
+        "media_type": media_type,
+        "data": base64.b64encode(raw).decode("ascii"),
+    }
 
 
 async def _render_refresh_response(request: Request, templates: Jinja2Templates, runtime: RuntimeService) -> HTMLResponse:
