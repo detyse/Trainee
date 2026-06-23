@@ -11,4 +11,3 @@ dist/
 .pytest_cache/
 
 /_docs
-/tests
