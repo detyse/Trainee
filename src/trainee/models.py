@@ -12,7 +12,8 @@ def utc_now() -> str:
 
 
 ParamType = Literal["int", "float", "str", "bool"]
-MetricSource = Literal["log_regex", "wandb_summary"]
+SignalSourceType = Literal["stdout", "stderr", "log_file_mtime", "heartbeat_json"]
+MetricSource = Literal["log_regex", "stdout_regex", "log_file_regex", "jsonl", "wandb_summary"]
 MetricGoal = Literal["min", "max"]
 DecisionAction = Literal["continue", "stop"]
 SecurityMode = Literal["guarded", "unsafe"]
@@ -80,8 +81,34 @@ class MetricSpec(BaseModel):
     name: str
     source: MetricSource = "log_regex"
     key_or_pattern: str
+    path: Optional[str] = None
+    paths: List[str] = Field(default_factory=list)
     goal: MetricGoal = "min"
     required: bool = True
+
+    @model_validator(mode="after")
+    def validate_source_paths(self) -> "MetricSpec":
+        if self.source in {"log_file_regex", "jsonl"} and not self.path and not self.paths:
+            raise ValueError(f"{self.source} requires path or paths")
+        return self
+
+
+class SignalSource(BaseModel):
+    type: SignalSourceType = "log_file_mtime"
+    path: Optional[str] = None
+    paths: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_source_paths(self) -> "SignalSource":
+        if self.type in {"log_file_mtime", "heartbeat_json"} and not self.path and not self.paths:
+            raise ValueError(f"{self.type} requires path or paths")
+        return self
+
+    def configured_paths(self) -> List[str]:
+        values = list(self.paths)
+        if self.path:
+            values.append(self.path)
+        return values
 
 
 class ProjectSpec(BaseModel):
@@ -91,6 +118,7 @@ class ProjectSpec(BaseModel):
     security_mode: SecurityMode = "guarded"
     data_paths: List[str] = Field(default_factory=list)
     log_paths: List[str] = Field(default_factory=list)
+    signal_sources: List[SignalSource] = Field(default_factory=list)
     wandb_enabled: bool = False
     heartbeat_interval_sec: float = 5.0
     stall_timeout_sec: float = 120.0
@@ -140,6 +168,43 @@ class ProjectSpec(BaseModel):
 
     def metric_index(self) -> Dict[str, MetricSpec]:
         return {item.name: item for item in self.metric_specs}
+
+    def signal_log_paths(self) -> List[str]:
+        paths: List[str] = []
+        for source in self.signal_sources:
+            if source.type in {"log_file_mtime", "heartbeat_json"}:
+                paths.extend(source.configured_paths())
+        if not self.signal_sources:
+            paths.extend(self.log_paths)
+        return _dedupe(paths)
+
+    def process_output_is_signal(self) -> bool:
+        if not self.signal_sources:
+            return True
+        return any(item.type in {"stdout", "stderr"} for item in self.signal_sources)
+
+    def metric_log_paths(self) -> List[str]:
+        paths: List[str] = []
+        for metric in self.metric_specs:
+            if metric.source in {"log_file_regex", "jsonl"}:
+                paths.extend(metric.paths)
+                if metric.path:
+                    paths.append(metric.path)
+        return _dedupe(paths)
+
+    def legacy_log_paths_for_metrics(self) -> List[str]:
+        return list(self.log_paths)
+
+
+def _dedupe(values: List[str]) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 class ProjectContext(BaseModel):
@@ -197,6 +262,7 @@ class RunSession(BaseModel):
     resumed_from: Optional[int] = None
     project_spec: Optional[ProjectSpec] = None
     project_context: Optional[ProjectContext] = None
+    image_analysis_count: int = 0
 
 
 class RoundRecord(BaseModel):

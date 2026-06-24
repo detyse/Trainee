@@ -201,7 +201,9 @@ class DecisionEngine:
         async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            body = response.json()
+            print("moonshot usage:", body.get("usage"))
+            return body["choices"][0]["message"]["content"]
 
     async def _anthropic_complete(
         self,
@@ -448,6 +450,22 @@ class DecisionEngine:
         history: List[RoundRecord],
         current_params: Dict[str, Any],
     ) -> str:
+        static_payload = {
+            "cache_version": 1,
+            "task": "You are a training automation agent. Decide next training params.",
+            "project_context": context.model_dump(mode="json"),
+            "tunable_params": [item.model_dump(mode="json") for item in spec.tunable_params],
+            "metric_specs": [item.model_dump(mode="json") for item in spec.metric_specs],
+            "metric_prompt": spec.metric_prompt,
+            "tuning_prompt": spec.tuning_prompt,
+            "output_schema": {
+                "action": "continue|stop",
+                "next_params": {},
+                "reason": "string",
+                "focus_metrics": ["string"],
+            },
+        }
+
         recent_history = []
         for item in history[-5:]:
             recent_history.append(
@@ -459,18 +477,32 @@ class DecisionEngine:
                     "exit_code": item.exit_code,
                 }
             )
-        return json.dumps(
-            {
-                "project_context": context.model_dump(mode="json"),
-                "tunable_params": [item.model_dump(mode="json") for item in spec.tunable_params],
-                "metric_specs": [item.model_dump(mode="json") for item in spec.metric_specs],
-                "metric_prompt": spec.metric_prompt,
-                "tuning_prompt": spec.tuning_prompt,
-                "current_params": current_params,
-                "recent_history": recent_history,
-            },
+
+        dynamic_payload = {
+            "current_params": current_params,
+            "recent_history": recent_history,
+        }
+
+        static_text = json.dumps(
+            static_payload,
             ensure_ascii=False,
-            indent=2,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        dynamic_text = json.dumps(
+            dynamic_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        return (
+            "<STATIC_CONTEXT>\n"
+            + static_text
+            + "\n</STATIC_CONTEXT>\n\n"
+            + "<DYNAMIC_ROUND_STATE>\n"
+            + dynamic_text
+            + "\n</DYNAMIC_ROUND_STATE>"
         )
 
     def _extract_json(self, content: str) -> Dict[str, Any]:

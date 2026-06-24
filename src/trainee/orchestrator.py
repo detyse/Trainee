@@ -11,7 +11,7 @@ from trainee.decision import DecisionEngine
 from trainee.events import EventBus
 from trainee.executor import TrainingExecutor
 from trainee.models import EventMessage, LoopSnapshot, ProjectBundle, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
-from trainee.parsers import discover_wandb_summary, missing_required_metrics, parse_metrics_from_logs
+from trainee.parsers import discover_wandb_summary, missing_required_metrics, parse_metrics_from_sources
 from trainee.providers import provider_settings_payload
 from trainee.reporter import ReportGenerator
 from trainee.settings import Settings
@@ -144,6 +144,16 @@ class RuntimeService:
     def loop_is_running(self) -> bool:
         return self._loop_task is not None and not self._loop_task.done()
 
+    def reserve_image_analysis(self, session_id: Optional[int] = None) -> Optional[Dict[str, int]]:
+        resolved_session_id = self._resolve_image_analysis_session_id(session_id)
+        if resolved_session_id is None:
+            return None
+        used, limit = self.storage.reserve_session_image_analysis(
+            resolved_session_id,
+            self.settings.max_image_analyses_per_session,
+        )
+        return {"session_id": resolved_session_id, "used": used, "limit": limit}
+
     def dashboard_payload(self, selected_run_id: Optional[int] = None) -> Dict[str, Any]:
         bundle = self.get_bundle()
         sessions = self.storage.list_sessions()
@@ -179,6 +189,7 @@ class RuntimeService:
             "prompt_presets_payload": [item.model_dump(mode="json") for item in prompt_presets],
             "runtime_settings": self._runtime_settings_payload(),
             "tunable_params_json": self._pretty_json([item.model_dump(mode="json") for item in bundle.spec.tunable_params] if bundle.spec else []),
+            "signal_sources_json": self._pretty_json([item.model_dump(mode="json") for item in bundle.spec.signal_sources] if bundle.spec else []),
             "metric_specs_json": self._pretty_json([item.model_dump(mode="json") for item in bundle.spec.metric_specs] if bundle.spec else []),
         }
 
@@ -188,11 +199,26 @@ class RuntimeService:
             "launch_project_root": str(project_root) if project_root else "",
             "launch_launcher_template": self._default_launcher_template(),
             "data_dir": str(self.settings.data_dir),
+            "project_data_dir": str(self.settings.project_data_dir),
             "database_path": str(self.settings.database_path),
             "artifacts_dir": str(self.settings.artifacts_dir),
             "config_path": str(self.settings.config_path),
+            "global_config_path": str(self.settings.global_config_path),
             **provider_settings_payload(self.settings),
         }
+
+    def _resolve_image_analysis_session_id(self, session_id: Optional[int]) -> Optional[int]:
+        if session_id is not None:
+            if self.storage.get_session(session_id) is None:
+                raise ValueError(f"session {session_id} not found")
+            return session_id
+
+        snapshot = self.storage.get_loop_snapshot()
+        if snapshot.current_session_id is not None:
+            return snapshot.current_session_id
+
+        latest_session = self.storage.get_latest_session()
+        return latest_session.id if latest_session else None
 
     def _launch_project_context_preview(self) -> ProjectContext:
         if self._launch_context_preview is None:
@@ -300,7 +326,12 @@ class RuntimeService:
                 snapshot.message = f"Starting round {round_index}."
                 self.storage.save_loop_snapshot(snapshot)
 
-                resolved_command = self.executor.render_command(spec, current_params)
+                resolved_command = self.executor.render_command(
+                    spec,
+                    current_params,
+                    session_id=session_id,
+                    round_index=round_index,
+                )
                 round_record = self.storage.create_round(
                     RoundRecord(
                         session_id=session_id,
@@ -345,9 +376,11 @@ class RuntimeService:
                 snapshot.message = f"Evaluating round {round_index}."
                 self.storage.save_loop_snapshot(snapshot)
 
-                log_text = self._read_log(result.internal_log_path)
                 wandb_summary_path, wandb_summary = discover_wandb_summary(spec, round_record.start_time)
-                metrics = parse_metrics_from_logs(log_text, spec, wandb_summary)
+                metrics, metric_log_paths = parse_metrics_from_sources(result.internal_log_path, spec, wandb_summary)
+                for path in metric_log_paths:
+                    if path not in round_record.log_paths:
+                        round_record.log_paths.append(path)
                 if wandb_summary_path and wandb_summary_path not in round_record.log_paths:
                     round_record.log_paths.append(wandb_summary_path)
                 round_record.metrics = metrics

@@ -37,7 +37,7 @@ from trainee.providers import (
 )
 from trainee.reporter import ReportGenerator
 from trainee.settings import Settings, load_settings, save_provider_config
-from trainee.storage import Storage
+from trainee.storage import ImageAnalysisLimitExceeded, Storage
 
 MAX_LLM_TEST_IMAGE_BYTES = 5 * 1024 * 1024
 logger = get_logger(__name__)
@@ -93,6 +93,8 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     @app.get("/llm-test", response_class=HTMLResponse)
     async def llm_test(request: Request) -> HTMLResponse:
         settings = request.app.state.settings
+        runtime = get_runtime(request)
+        latest_session = runtime.storage.get_latest_session()
         return templates.TemplateResponse(
             request,
             "llm_test.html",
@@ -102,6 +104,8 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 "model": active_model(settings),
                 "configured": provider_is_configured(settings),
                 "max_image_mb": MAX_LLM_TEST_IMAGE_BYTES // (1024 * 1024),
+                "image_analysis_session_id": latest_session.id if latest_session else None,
+                "image_analysis_limit": settings.max_image_analyses_per_session,
             },
         )
 
@@ -310,14 +314,20 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     async def api_llm_test(
         request: Request,
         prompt: str = Form(...),
+        session_id: Optional[int] = Form(None),
         image: Optional[UploadFile] = File(None),
     ) -> JSONResponse:
         runtime = get_runtime(request)
         try:
             image_payload = await _read_llm_test_image(image)
+            image_analysis_usage = runtime.reserve_image_analysis(session_id) if image_payload is not None else None
             result = await runtime.decision_engine.probe(prompt, image=image_payload)
+            if image_analysis_usage is not None:
+                result["image_analysis"] = image_analysis_usage
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ImageAnalysisLimitExceeded as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return JSONResponse(result)
@@ -331,6 +341,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         security_mode: str = Form("guarded"),
         data_paths_json: str = Form("[]"),
         log_paths_json: str = Form("[]"),
+        signal_sources_json: str = Form("[]"),
         wandb_enabled: Optional[str] = Form(None),
         heartbeat_interval_sec: float = Form(5.0),
         stall_timeout_sec: float = Form(120.0),
@@ -349,6 +360,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 security_mode=security_mode,
                 data_paths_json=data_paths_json,
                 log_paths_json=log_paths_json,
+                signal_sources_json=signal_sources_json,
                 wandb_enabled=wandb_enabled is not None,
                 heartbeat_interval_sec=heartbeat_interval_sec,
                 stall_timeout_sec=stall_timeout_sec,
@@ -506,11 +518,12 @@ def _update_provider_settings(
     if runtime.loop_is_running():
         raise ValueError("stop the loop before changing provider settings")
     provider_payload = build_provider_config_payload(update)
-    save_provider_config(runtime.settings.config_path, provider_payload)
+    save_provider_config(runtime.settings.global_config_path, provider_payload)
     updated_settings = load_settings(
         repo_root=runtime.settings.repo_root,
         data_dir=runtime.settings.data_dir,
         project_root=runtime.settings.project_root,
+        global_config_path=runtime.settings.global_config_path,
     )
     request.app.state.settings = updated_settings
     runtime.update_settings(updated_settings)
@@ -550,6 +563,7 @@ def _project_spec_from_values(
     security_mode: str,
     data_paths_json: str,
     log_paths_json: str,
+    signal_sources_json: str,
     wandb_enabled: bool,
     heartbeat_interval_sec: float,
     stall_timeout_sec: float,
@@ -566,6 +580,7 @@ def _project_spec_from_values(
         security_mode=security_mode,
         data_paths=_parse_json_field(data_paths_json, "data_paths_json"),
         log_paths=_parse_json_field(log_paths_json, "log_paths_json"),
+        signal_sources=_parse_json_field(signal_sources_json, "signal_sources_json"),
         wandb_enabled=wandb_enabled,
         heartbeat_interval_sec=heartbeat_interval_sec,
         stall_timeout_sec=stall_timeout_sec,
@@ -585,6 +600,7 @@ def _project_spec_from_form(form: FormData) -> ProjectSpec:
         security_mode=_form_str(form, "security_mode", "guarded"),
         data_paths_json=_form_str(form, "data_paths_json", "[]"),
         log_paths_json=_form_str(form, "log_paths_json", "[]"),
+        signal_sources_json=_form_str(form, "signal_sources_json", "[]"),
         wandb_enabled=_form_checkbox(form, "wandb_enabled"),
         heartbeat_interval_sec=_form_float(form, "heartbeat_interval_sec", 5.0),
         stall_timeout_sec=_form_float(form, "stall_timeout_sec", 120.0),

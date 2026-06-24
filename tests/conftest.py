@@ -66,15 +66,16 @@ def runtime_env(tmp_path: Path) -> dict[str, object]:
     _write_fake_project(external_project)
 
     data_dir = tmp_path / "runtime-data"
+    config_path = tmp_path / "home" / ".trainee" / "config.json"
     settings = Settings(
         repo_root=repo_root,
         project_root=None,
-        data_dir=data_dir,
+        project_data_dir=data_dir,
         database_path=data_dir / "runtime.sqlite3",
         artifacts_dir=data_dir / "artifacts",
         template_dir=repo_root / "src" / "trainee" / "templates",
         static_dir=repo_root / "src" / "trainee" / "static",
-        config_path=data_dir / "config.json",
+        global_config_path=config_path,
         llm_provider="none",
         llm_timeout_sec=5.0,
         openai_api_key=None,
@@ -94,6 +95,7 @@ def runtime_env(tmp_path: Path) -> dict[str, object]:
             "external_project": external_project,
             "python": sys.executable,
             "data_dir": data_dir,
+            "config_path": config_path,
         }
 
 

@@ -10,18 +10,19 @@ LLMProvider = Literal["none", "moonshot", "openai", "anthropic"]
 
 DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
+DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION = 3
 
 
 @dataclass(frozen=True)
 class Settings:
     repo_root: Path
     project_root: Path | None
-    data_dir: Path
+    project_data_dir: Path
     database_path: Path
     artifacts_dir: Path
     template_dir: Path
     static_dir: Path
-    config_path: Path
+    global_config_path: Path
     llm_provider: LLMProvider
     llm_timeout_sec: float
     openai_api_key: str | None
@@ -35,12 +36,22 @@ class Settings:
     moonshot_api_key: str | None = None
     moonshot_base_url: str = DEFAULT_MOONSHOT_BASE_URL
     moonshot_model: str = DEFAULT_MOONSHOT_MODEL
+    max_image_analyses_per_session: int = DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION
+
+    @property
+    def data_dir(self) -> Path:
+        return self.project_data_dir
+
+    @property
+    def config_path(self) -> Path:
+        return self.global_config_path
 
 
 def load_settings(
     repo_root: Path | None = None,
     data_dir: Path | None = None,
     project_root: Path | None = None,
+    global_config_path: Path | None = None,
 ) -> Settings:
     env_project_root = os.getenv("TRAINEE_PROJECT_ROOT")
     if project_root is None and env_project_root:
@@ -48,24 +59,24 @@ def load_settings(
     project_root = project_root.expanduser().resolve() if project_root is not None else None
     repo_root = (repo_root or project_root or Path(__file__).resolve().parents[2]).resolve()
 
-    data_dir = (
-        data_dir.expanduser().resolve()
-        if data_dir is not None
-        else _resolve_path(os.getenv("TRAINEE_DATA_DIR", str(Path.home() / ".trainee")), repo_root)
+    global_config_path = (
+        global_config_path.expanduser().resolve()
+        if global_config_path is not None
+        else (Path.home() / ".trainee" / "config.json").expanduser().resolve()
     )
-    config_path = data_dir / "config.json"
-    config_payload = _read_config(config_path)
-    database_path = data_dir / "runtime.sqlite3"
-    artifacts_dir = data_dir / "artifacts"
+    project_data_dir = _resolve_project_data_dir(repo_root, project_root, data_dir)
+    config_payload = _read_config(global_config_path)
+    database_path = project_data_dir / "runtime.sqlite3"
+    artifacts_dir = project_data_dir / "artifacts"
     return Settings(
         repo_root=repo_root,
         project_root=project_root,
-        data_dir=data_dir,
+        project_data_dir=project_data_dir,
         database_path=database_path,
         artifacts_dir=artifacts_dir,
         template_dir=Path(__file__).resolve().parent / "templates",
         static_dir=Path(__file__).resolve().parent / "static",
-        config_path=config_path,
+        global_config_path=global_config_path,
         llm_provider=_resolve_llm_provider(config_payload),
         llm_timeout_sec=float(_settings_value("TRAINEE_LLM_TIMEOUT_SEC", config_payload, "30")),
         openai_api_key=_settings_value("OPENAI_API_KEY", config_payload),
@@ -79,6 +90,13 @@ def load_settings(
         anthropic_model=_settings_value("ANTHROPIC_MODEL", config_payload, "claude-3-5-haiku-latest"),
         anthropic_version=_settings_value("ANTHROPIC_VERSION", config_payload, "2023-06-01"),
         anthropic_max_tokens=int(_settings_value("ANTHROPIC_MAX_TOKENS", config_payload, "1024")),
+        max_image_analyses_per_session=int(
+            _settings_value(
+                "TRAINEE_MAX_IMAGE_ANALYSES_PER_SESSION",
+                config_payload,
+                str(DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION),
+            )
+        ),
     )
 
 
@@ -160,6 +178,8 @@ def _config_value(name: str, config_payload: Dict[str, Any]) -> Any:
         return config_payload.get("llm_provider")
     if name == "TRAINEE_LLM_TIMEOUT_SEC":
         return config_payload.get("llm_timeout_sec")
+    if name == "TRAINEE_MAX_IMAGE_ANALYSES_PER_SESSION":
+        return config_payload.get("max_image_analyses_per_session")
     provider_keys = {
         "OPENAI_API_KEY": ("openai", "api_key"),
         "OPENAI_BASE_URL": ("openai", "base_url"),
@@ -191,3 +211,13 @@ def _resolve_path(raw: str, repo_root: Path) -> Path:
     if not path.is_absolute():
         path = repo_root / path
     return path.resolve()
+
+
+def _resolve_project_data_dir(repo_root: Path, project_root: Path | None, data_dir: Path | None) -> Path:
+    if data_dir is not None:
+        return data_dir.expanduser().resolve()
+    env_data_dir = os.getenv("TRAINEE_DATA_DIR")
+    if env_data_dir:
+        return _resolve_path(env_data_dir, repo_root)
+    runtime_root = project_root or repo_root
+    return (runtime_root / ".trainee").resolve()

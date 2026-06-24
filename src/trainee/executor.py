@@ -9,7 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from trainee.models import ProjectSpec, utc_now
 from trainee.parsers import extract_wandb_url
@@ -33,6 +33,43 @@ class ExecutionResult:
     terminated_reason: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class RoundWorkspace:
+    session_id: int
+    round_index: int
+    session_dir: Path
+    round_dir: Path
+    config_path: Path
+
+    def ensure_dirs(self) -> None:
+        self.round_dir.mkdir(parents=True, exist_ok=True)
+
+    def command_vars(self) -> Dict[str, str]:
+        return {
+            "session_id": str(self.session_id),
+            "round_index": str(self.round_index),
+            "session_dir": shlex.quote(str(self.session_dir)),
+            "round_dir": shlex.quote(str(self.round_dir)),
+            "config_path": shlex.quote(str(self.config_path)),
+        }
+
+    def env_vars(self) -> Dict[str, str]:
+        return {
+            "TRAINEE_SESSION_ID": str(self.session_id),
+            "TRAINEE_ROUND_INDEX": str(self.round_index),
+            "TRAINEE_SESSION_DIR": str(self.session_dir),
+            "TRAINEE_ROUND_DIR": str(self.round_dir),
+            "TRAINEE_CONFIG_PATH": str(self.config_path),
+        }
+
+    def payload(self) -> Dict[str, str]:
+        return {
+            "session_dir": str(self.session_dir),
+            "round_dir": str(self.round_dir),
+            "config_path": str(self.config_path),
+        }
+
+
 class TrainingExecutor:
     async def run_round(
         self,
@@ -46,17 +83,22 @@ class TrainingExecutor:
     ) -> ExecutionResult:
         started_at = utc_now()
         self.validate_paths(spec, artifacts_dir)
-        session_dir = artifacts_dir / f"session-{session_id:04d}"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        internal_log_path = session_dir / f"round-{round_index:04d}.log"
-        resolved_command = self.render_command(spec, param_values)
+        internal_session_dir = artifacts_dir / f"session-{session_id:04d}"
+        internal_session_dir.mkdir(parents=True, exist_ok=True)
+        internal_log_path = internal_session_dir / f"round-{round_index:04d}.log"
+        workspace = self.round_workspace(spec, session_id, round_index)
+        workspace.ensure_dirs()
+        resolved_command = self.render_command(spec, param_values, session_id=session_id, round_index=round_index)
         working_dir = Path(spec.working_dir).expanduser().resolve()
-        external_log_paths = self.resolve_log_paths(spec)
+        signal_log_paths = self._configured_paths(spec.signal_log_paths(), working_dir)
+        env = dict(os.environ)
+        env.update(workspace.env_vars())
         secure_command = build_secure_command(
             project_root=Path(spec.project_root),
             working_dir=working_dir,
             command=resolved_command,
             security_mode=spec.security_mode,
+            base_env=env,
         )
 
         state = _ExecutionState()
@@ -75,17 +117,18 @@ class TrainingExecutor:
                 "session_id": session_id,
                 "round_index": round_index,
                 "command": resolved_command,
+                **workspace.payload(),
                 "started_at": started_at,
             }
         )
 
         state.last_signal_at = started_at
         reader_task = asyncio.create_task(
-            self._stream_output(process, internal_log_path, state),
+            self._stream_output(process, internal_log_path, state, output_is_signal=spec.process_output_is_signal()),
             name=f"round-{round_index}-reader",
         )
         heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(spec, session_id, round_index, external_log_paths, state, heartbeat),
+            self._heartbeat_loop(spec, session_id, round_index, signal_log_paths, state, heartbeat),
             name=f"round-{round_index}-heartbeat",
         )
         wait_task = asyncio.create_task(process.wait(), name=f"round-{round_index}-wait")
@@ -115,6 +158,14 @@ class TrainingExecutor:
             await heartbeat_task
 
         ended_at = utc_now()
+        external_log_paths = self.resolve_existing_paths(
+            [
+                *spec.signal_log_paths(),
+                *spec.metric_log_paths(),
+                *spec.legacy_log_paths_for_metrics(),
+            ],
+            spec,
+        )
         log_paths = [str(internal_log_path)] + [str(path) for path in external_log_paths]
         return ExecutionResult(
             resolved_command=resolved_command,
@@ -177,7 +228,17 @@ class TrainingExecutor:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, sig)
 
-    def render_command(self, spec: ProjectSpec, param_values: Dict[str, Any]) -> str:
+    def render_command(
+        self,
+        spec: ProjectSpec,
+        param_values: Dict[str, Any],
+        *,
+        session_id: Optional[int] = None,
+        round_index: Optional[int] = None,
+    ) -> str:
+        if (session_id is None) != (round_index is None):
+            raise ValueError("session_id and round_index must be provided together")
+
         validated = spec.merge_param_values(param_values)
         extra_args = self._render_cli_args(spec, validated)
         template_vars = {
@@ -186,10 +247,24 @@ class TrainingExecutor:
             "trainee_dir": shlex.quote(str(project_trainee_dir(Path(spec.project_root)))),
             "extra_args": extra_args,
         }
+        if session_id is not None and round_index is not None:
+            template_vars.update(self.round_workspace(spec, session_id, round_index).command_vars())
         if "{extra_args}" in spec.launcher_template:
             return spec.launcher_template.format_map(template_vars).strip()
         rendered = spec.launcher_template.format_map({k: v for k, v in template_vars.items() if k != "extra_args"}).strip()
         return f"{rendered} {extra_args}".strip()
+
+    def round_workspace(self, spec: ProjectSpec, session_id: int, round_index: int) -> RoundWorkspace:
+        trainee_dir = project_trainee_dir(Path(spec.project_root))
+        session_dir = trainee_dir / "runs" / f"session-{session_id:04d}"
+        round_dir = session_dir / f"round-{round_index:04d}"
+        return RoundWorkspace(
+            session_id=session_id,
+            round_index=round_index,
+            session_dir=session_dir,
+            round_dir=round_dir,
+            config_path=round_dir / "config.yaml",
+        )
 
     def resolve_log_paths(self, spec: ProjectSpec) -> List[Path]:
         resolved: List[Path] = []
@@ -213,23 +288,35 @@ class TrainingExecutor:
             deduped.append(path)
         return deduped
 
+    def resolve_existing_paths(self, raw_paths: Iterable[str], spec: ProjectSpec) -> List[Path]:
+        return self._resolve_existing_paths(self._configured_paths(raw_paths, Path(spec.working_dir).expanduser().resolve()))
+
     def validate_paths(self, spec: ProjectSpec, artifacts_dir: Path) -> None:
         project_root = Path(spec.project_root).expanduser().resolve()
         working_dir = Path(spec.working_dir).expanduser().resolve()
 
         self._ensure_within(working_dir, project_root, "working_dir")
-        for field_name, raw_paths in (("data_paths", spec.data_paths), ("log_paths", spec.log_paths)):
+        path_groups = [
+            ("data_paths", spec.data_paths, False),
+            ("log_paths", spec.log_paths, True),
+            ("signal_sources", spec.signal_log_paths(), True),
+            ("metric_sources", spec.metric_log_paths(), True),
+        ]
+        for field_name, raw_paths, guarded_log_path in path_groups:
             for raw_path in raw_paths:
                 candidate = self._configured_path(raw_path, working_dir)
                 self._ensure_within(candidate, project_root, field_name)
-                if spec.security_mode == "guarded" and field_name == "log_paths":
-                    self._ensure_within(candidate, project_trainee_dir(project_root), "log_paths")
+                if spec.security_mode == "guarded" and guarded_log_path:
+                    self._ensure_within(candidate, project_trainee_dir(project_root), field_name)
 
     def _configured_path(self, raw_path: str, working_dir: Path) -> Path:
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
             path = working_dir / path
         return path.resolve()
+
+    def _configured_paths(self, raw_paths: Iterable[str], working_dir: Path) -> List[Path]:
+        return [self._configured_path(raw_path, working_dir) for raw_path in raw_paths]
 
     def _ensure_within(self, path: Path, root: Path, field_name: str) -> None:
         try:
@@ -251,7 +338,14 @@ class TrainingExecutor:
             parts.append(shlex.quote(str(value)))
         return " ".join(parts)
 
-    async def _stream_output(self, process: asyncio.subprocess.Process, log_path: Path, state: "_ExecutionState") -> None:
+    async def _stream_output(
+        self,
+        process: asyncio.subprocess.Process,
+        log_path: Path,
+        state: "_ExecutionState",
+        *,
+        output_is_signal: bool,
+    ) -> None:
         assert process.stdout is not None
         with log_path.open("a", encoding="utf-8") as handle:
             while True:
@@ -262,7 +356,8 @@ class TrainingExecutor:
                 handle.write(text)
                 handle.flush()
                 state.last_output_line = text.strip()
-                state.last_signal_at = utc_now()
+                if output_is_signal:
+                    state.last_signal_at = utc_now()
                 if state.wandb_run_url is None:
                     state.wandb_run_url = extract_wandb_url(text)
 
@@ -271,13 +366,13 @@ class TrainingExecutor:
         spec: ProjectSpec,
         session_id: int,
         round_index: int,
-        external_log_paths: List[Path],
+        signal_log_paths: List[Path],
         state: "_ExecutionState",
         heartbeat: HeartbeatReporter,
     ) -> None:
         while True:
             await asyncio.sleep(spec.heartbeat_interval_sec)
-            external_signal = self._latest_external_signal(external_log_paths)
+            external_signal = self._latest_external_signal(signal_log_paths)
             last_signal = self._latest_signal(state.last_signal_at, external_signal)
             is_stalled = False
             if last_signal:
@@ -300,12 +395,30 @@ class TrainingExecutor:
 
     def _latest_external_signal(self, log_paths: List[Path]) -> Optional[str]:
         latest_timestamp = None
-        for path in log_paths:
+        for path in self._resolve_existing_paths(log_paths):
             if not path.exists():
                 continue
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
             latest_timestamp = self._latest_signal(latest_timestamp, mtime)
         return latest_timestamp
+
+    def _resolve_existing_paths(self, path_patterns: Iterable[Path]) -> List[Path]:
+        resolved: List[Path] = []
+        for path in path_patterns:
+            matches = glob.glob(str(path), recursive=True)
+            if matches:
+                resolved.extend(Path(item).resolve() for item in matches if Path(item).is_file())
+            elif path.is_file():
+                resolved.append(path.resolve())
+        deduped: List[Path] = []
+        seen = set()
+        for path in resolved:
+            marker = str(path)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            deduped.append(path)
+        return deduped
 
     def _latest_signal(self, current: Optional[str], candidate: Optional[str]) -> Optional[str]:
         if current is None:

@@ -47,6 +47,10 @@
         <span>Log paths JSON</span>
         <textarea name="log_paths_json" rows="4">{{ spec.log_paths | tojson(indent=2) if spec else '[]' }}</textarea>
       </label>
+      <label>
+        <span>Signal sources JSON</span>
+        <textarea name="signal_sources_json" rows="4">{{ signal_sources_json }}</textarea>
+      </label>
     </div>
 
     <div class="three-col">

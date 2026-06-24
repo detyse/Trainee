@@ -52,6 +52,30 @@ def test_rendered_command_shell_quotes_values(runtime_env):
     assert "{extra_args}" not in rendered
 
 
+def test_rendered_command_exposes_round_workspace(runtime_env):
+    external_project = runtime_env["external_project"]
+    spec = REGISTER_PAYLOAD_TEMPLATE | {
+        "project_root": str(external_project),
+        "working_dir": str(external_project),
+        "launcher_template": "python {project_root}/scripts/wrapper.py --session-id {session_id} --round-index {round_index} --config-out {config_path} --work-dir {round_dir} {extra_args}",
+        "data_paths": [str(external_project / "data")],
+        "log_paths": [str(external_project / ".trainee" / "runs" / "**" / "*.log")],
+    }
+
+    rendered = TrainingExecutor().render_command(
+        ProjectSpec.model_validate(spec),
+        {"lr": 0.2, "epochs": 2},
+        session_id=3,
+        round_index=2,
+    )
+
+    assert "--session-id 3" in rendered
+    assert "--round-index 2" in rendered
+    assert ".trainee/runs/session-0003/round-0002/config.yaml" in rendered
+    assert ".trainee/runs/session-0003/round-0002" in rendered
+    assert "--lr 0.2" in rendered
+
+
 def test_health_endpoint_reports_db_and_loop_state(runtime_env):
     client = runtime_env["client"]
 
@@ -106,6 +130,123 @@ def test_loop_runs_two_rounds_and_collects_metrics(runtime_env, wait_for):
     assert report.status_code == 200
     assert "Trainee Session Report" in report.text
     assert (runtime_env["data_dir"] / "artifacts" / f"session-{session_id:04d}" / "report.md").exists()
+
+
+def test_loop_writes_wrapper_config_under_round_workspace(runtime_env, wait_for):
+    client = runtime_env["client"]
+    external_project = runtime_env["external_project"]
+    python = runtime_env["python"]
+
+    wrapper_path = external_project / "scripts" / "trainee_launch.py"
+    wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+    wrapper_path.write_text(
+        """
+import argparse
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config-out", required=True)
+parser.add_argument("--round-dir", required=True)
+parser.add_argument("--lr", type=float, default=0.1)
+parser.add_argument("--epochs", type=int, default=1)
+args = parser.parse_args()
+
+config_path = Path(args.config_out)
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config_path.write_text(f"lr: {args.lr}\\nepochs: {args.epochs}\\n", encoding="utf-8")
+
+log_path = Path(args.round_dir) / "logs" / "train.log"
+log_path.parent.mkdir(parents=True, exist_ok=True)
+line = "step=0 total_loss=0.25 loss=0.25\\n"
+print(line, end="", flush=True)
+log_path.write_text(line, encoding="utf-8")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    register_payload = REGISTER_PAYLOAD_TEMPLATE | {
+        "security_mode": "unsafe",
+        "project_root": str(external_project),
+        "working_dir": str(external_project),
+        "launcher_template": f"{python} {{project_root}}/scripts/trainee_launch.py --config-out {{config_path}} --round-dir {{round_dir}} {{extra_args}}",
+        "data_paths": [str(external_project / "data")],
+        "log_paths": [str(external_project / ".trainee" / "runs" / "**" / "*.log")],
+        "max_rounds": 1,
+    }
+
+    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/loop/start").status_code == 200
+
+    wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
+    runs_payload = client.get("/api/runs").json()
+    session_id = runs_payload["sessions"][0]["id"]
+    config_path = external_project / ".trainee" / "runs" / f"session-{session_id:04d}" / "round-0001" / "config.yaml"
+
+    assert runs_payload["rounds"][0]["status"] == "completed"
+    assert config_path.read_text(encoding="utf-8") == "lr: 0.2\nepochs: 2\n"
+    assert str(config_path) in runs_payload["rounds"][0]["resolved_command"]
+
+
+def test_loop_collects_metrics_from_log_file_created_during_round(runtime_env, wait_for):
+    client = runtime_env["client"]
+    external_project = runtime_env["external_project"]
+    python = runtime_env["python"]
+
+    script_path = external_project / "scripts" / "file_only_metrics.py"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(
+        """
+import argparse
+import time
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--log-file", required=True)
+args, _ = parser.parse_known_args()
+
+log_path = Path(args.log_file)
+log_path.parent.mkdir(parents=True, exist_ok=True)
+for step, loss in enumerate([0.9, 0.4]):
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"step={step} total_loss={loss}\\n")
+    time.sleep(0.12)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    log_glob = str(external_project / "logs" / "late-*.log")
+    register_payload = REGISTER_PAYLOAD_TEMPLATE | {
+        "project_root": str(external_project),
+        "working_dir": str(external_project),
+        "launcher_template": f"{python} {{project_root}}/scripts/file_only_metrics.py --log-file {{project_root}}/logs/late-created.log",
+        "data_paths": [str(external_project / "data")],
+        "log_paths": [],
+        "signal_sources": [{"type": "log_file_mtime", "paths": [log_glob]}],
+        "metric_specs": [
+            {
+                "name": "total_loss",
+                "source": "log_file_regex",
+                "path": log_glob,
+                "key_or_pattern": r"total_loss=(?P<value>-?\d+(?:\.\d+)?)",
+                "goal": "min",
+                "required": True,
+            }
+        ],
+        "heartbeat_interval_sec": 0.05,
+        "stall_timeout_sec": 0.2,
+        "max_rounds": 1,
+    }
+
+    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/loop/start").status_code == 200
+
+    wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
+    run = client.get("/api/runs").json()["rounds"][0]
+    assert run["status"] == "completed"
+    assert run["metrics"]["total_loss"] == 0.4
+    assert any("late-created.log" in path for path in run["log_paths"])
 
 
 def test_guarded_loop_writes_logs_under_trainee(runtime_env, wait_for):

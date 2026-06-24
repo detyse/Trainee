@@ -9,6 +9,10 @@ from typing import Any, Dict, List, Optional
 from trainee.models import AgentDecision, LoopSnapshot, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
 
 
+class ImageAnalysisLimitExceeded(RuntimeError):
+    pass
+
+
 class Storage:
     def __init__(self, database_path: Path):
         self.database_path = database_path
@@ -47,7 +51,8 @@ class Storage:
                     current_round INTEGER NOT NULL DEFAULT 0,
                     resumed_from INTEGER,
                     project_spec_json TEXT,
-                    project_context_json TEXT
+                    project_context_json TEXT,
+                    image_analysis_count INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS rounds (
@@ -74,6 +79,7 @@ class Storage:
             self._ensure_column("sessions", "resumed_from", "INTEGER")
             self._ensure_column("sessions", "project_spec_json", "TEXT")
             self._ensure_column("sessions", "project_context_json", "TEXT")
+            self._ensure_column("sessions", "image_analysis_count", "INTEGER NOT NULL DEFAULT 0")
             self._connection.commit()
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> None:
@@ -157,9 +163,9 @@ class Storage:
                 """
                 INSERT INTO sessions(
                     status, started_at, ended_at, stop_reason, requested_stop, current_round,
-                    resumed_from, project_spec_json, project_context_json
+                    resumed_from, project_spec_json, project_context_json, image_analysis_count
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.status,
@@ -171,6 +177,7 @@ class Storage:
                     session.resumed_from,
                     json.dumps(session.project_spec.model_dump(mode="json")) if session.project_spec else None,
                     json.dumps(session.project_context.model_dump(mode="json")) if session.project_context else None,
+                    session.image_analysis_count,
                 ),
             )
             self._connection.commit()
@@ -202,6 +209,29 @@ class Storage:
             )
             self._connection.commit()
         return session
+
+    def reserve_session_image_analysis(self, session_id: int, limit: int) -> tuple[int, int]:
+        if limit < 1:
+            raise ImageAnalysisLimitExceeded(f"session {session_id} image analysis limit reached (0/{limit})")
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT image_analysis_count FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"session {session_id} not found")
+            current = int(row["image_analysis_count"] or 0)
+            if current >= limit:
+                raise ImageAnalysisLimitExceeded(
+                    f"session {session_id} image analysis limit reached ({current}/{limit})"
+                )
+            updated = current + 1
+            self._connection.execute(
+                "UPDATE sessions SET image_analysis_count = ? WHERE id = ?",
+                (updated, session_id),
+            )
+            self._connection.commit()
+        return updated, limit
 
     def get_session(self, session_id: int) -> Optional[RunSession]:
         with self._lock:
@@ -330,6 +360,7 @@ class Storage:
             resumed_from=row["resumed_from"],
             project_spec=ProjectSpec.model_validate(project_spec) if project_spec else None,
             project_context=ProjectContext.model_validate(project_context) if project_context else None,
+            image_analysis_count=row["image_analysis_count"],
         )
 
     def _round_from_row(self, row: sqlite3.Row) -> RoundRecord:

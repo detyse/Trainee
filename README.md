@@ -8,8 +8,8 @@ Trainee 是一个面向训练自动化的 agent runtime。它不承载训练代�
 - 自动扫描外部项目，生成 `ProjectContext`，把“项目是什么、数据在哪、训练入口在哪、参数怎么调、结果怎么看”固化进上下文。
 - 使用显式 launcher 执行训练，例如 `conda run ... python train.py ...` 或 `/path/to/train.sh ...`。
 - 默认用 bubblewrap 进行 guarded run：宿主文件系统只读，只有项目内 `.trainee/` 可写。
-- 通过本地子进程输出和日志更新时间做 heartbeat 检测；超过阈值则标记 stalled。
-- 解析日志里的 `loss/total_loss`，并支持按配置从正则或 W&B summary 中抽取更多指标。
+- 通过本地子进程输出、日志文件更新时间等 signal source 做 heartbeat 检测；超过阈值则标记 stalled。
+- 通过 stdout regex、显式日志文件 regex、JSONL 等 metric source 抽取 `loss/total_loss` 和自定义指标。
 - 通过轻量控制台查看项目信息、loop 状态、轮次历史、命令、参数、日志路径、W&B 链接和 agent 决策。
 
 ## 快速开始
@@ -38,6 +38,12 @@ conda run -n trainer python {project_root}/train.py --config {project_root}/conf
 
 - `{project_root}`
 - `{working_dir}`
+- `{trainee_dir}`
+- `{session_id}`
+- `{round_index}`
+- `{session_dir}`
+- `{round_dir}`
+- `{config_path}`
 - `{extra_args}`
 
 `{extra_args}` 由 runtime 根据 `tunable_params` 自动拼成 CLI 参数。agent 不会自由生成新的 shell 片段，只能覆盖白名单参数。
@@ -75,7 +81,7 @@ export PATH="$HOME/.local/bin:$PATH"
 $HOME/.local/bin/trainee --help
 ```
 
-默认运行数据写入 `$HOME/.trainee`，包括 `runtime.sqlite3`、`artifacts/` 和 `config.json`。如果希望放到别的位置，可以设置 `TRAINEE_DATA_DIR`。
+Provider 配置默认写入 `$HOME/.trainee/config.json`。项目运行数据写入项目内 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/`；如果希望运行数据放到别的位置，可以设置 `TRAINEE_DATA_DIR`。
 
 ## 项目初始化
 
@@ -86,7 +92,7 @@ cd ~/project/toymodel
 trainee init
 ```
 
-`init` 是项目初始化动作，不启动 Web UI。它会像 agent 一样在终端输出本次读了哪些文件、写了哪些文件，例如：
+`init` 是项目初始化动作，不启动 Web UI。它会生成一份可编辑的项目草稿，而不是直接开始训练。它会像 agent 一样在终端输出本次读了哪些文件、写了哪些文件，例如：
 
 ```text
 Trainee init
@@ -97,6 +103,7 @@ Trainee init
 - Wrote: .trainee/context.md
 - Wrote: .trainee/README.md
 - Launcher: python {project_root}/train.py {extra_args}
+- Next: review .trainee/context.md and .trainee/project.json, then run `trainee run`
 ```
 
 项目内生成的 `.trainee/` 用来保存这个项目的初始化草稿和上下文说明：
@@ -105,17 +112,29 @@ Trainee init
 - `.trainee/context.md`: Trainee 读取项目代码后生成的项目理解。
 - `.trainee/README.md`: 本目录文件说明。
 
+推荐工作流：
+
+1. 先检查和修改 `.trainee/context.md`，补充项目目标、限制条件和评价标准。
+2. 再检查和修改 `.trainee/project.json`，尤其是 `launcher_template`、`tunable_params` 和 `metric_specs`。
+3. 运行 `trainee doctor` 检查项目配置。
+4. 确认无误后运行 `trainee run`。
+
 如果文件已存在，`trainee init` 默认保留旧文件；需要重写时使用：
 
 ```bash
 trainee init --force
 ```
 
-生成的 `project.json` 默认 `security_mode` 为 `guarded`，默认 `log_paths` 指向 `.trainee/logs/**/*.log` 和 `.trainee/runs/**/*.log`。Launcher 模板可用变量：
+生成的 `project.json` 默认 `security_mode` 为 `guarded`，默认用 stdout 和 `.trainee/logs/**/*.log`、`.trainee/runs/**/*.log` 作为 heartbeat signal。Launcher 模板可用变量：
 
 - `{project_root}`
 - `{working_dir}`
 - `{trainee_dir}`
+- `{session_id}`
+- `{round_index}`
+- `{session_dir}`: 当前 session 的项目内输出目录，形如 `.trainee/runs/session-0001`
+- `{round_dir}`: 当前 round 的项目内输出目录，形如 `.trainee/runs/session-0001/round-0001`
+- `{config_path}`: 当前 round 的默认 config 快照路径，形如 `.trainee/runs/session-0001/round-0001/config.yaml`
 - `{extra_args}`
 
 ## 项目运行
@@ -134,7 +153,7 @@ trainee run
 trainee run --unsafe
 ```
 
-普通 `trainee serve` 不绑定当前目录，只使用全局 runtime/settings。项目初始化只通过 `trainee init` 显式发生。`trainee launch` 暂时保留为兼容 alias。
+普通 `trainee serve` 不绑定当前目录，也不会自动初始化当前目录。项目初始化只通过 `trainee init` 显式发生。`trainee launch` 暂时保留为兼容 alias。
 
 ## 后续更新
 
@@ -174,7 +193,7 @@ git commit -m "local changes"
 git stash push -u
 ```
 
-## 工具式调用
+## 工具式调用 ???
 
 除了网页控制台，也可以把 Trainee 当作本地工具服务调用。先启动服务：
 
@@ -209,6 +228,13 @@ trainee tools
   "security_mode": "guarded",
   "data_paths": ["/path/to/external-project/data"],
   "log_paths": ["/path/to/external-project/.trainee/logs/*.log"],
+  "signal_sources": [
+    {"type": "stdout"},
+    {
+      "type": "log_file_mtime",
+      "paths": ["/path/to/external-project/.trainee/logs/*.log"]
+    }
+  ],
   "heartbeat_interval_sec": 5,
   "stall_timeout_sec": 120,
   "max_rounds": 3,
@@ -225,7 +251,8 @@ trainee tools
   "metric_specs": [
     {
       "name": "total_loss",
-      "source": "log_regex",
+      "source": "log_file_regex",
+      "path": "/path/to/external-project/.trainee/logs/*.log",
       "key_or_pattern": "total_loss=(?P<value>-?\\d+(?:\\.\\d+)?)",
       "goal": "min",
       "required": true
@@ -259,7 +286,8 @@ printf '%s\n' '{"run_id": 1}' | trainee call runs_get --input -
 - `launcher_template`: 完整启动命令模板
 - `security_mode`: `guarded` 或 `unsafe`，默认 `guarded`
 - `data_paths`: 数据路径列表，JSON 数组
-- `log_paths`: 外部日志路径或 glob 列表，JSON 数组
+- `log_paths`: 旧版兼容字段；未配置 `signal_sources` 时用作日志 mtime signal，也会作为旧 `log_regex` 的日志输入
+- `signal_sources`: heartbeat 信号来源，支持 `stdout`、`stderr`、`log_file_mtime`、`heartbeat_json`
 - `tunable_params`: 可调参数白名单，JSON 数组
 - `metric_specs`: 训练结果指标规则，JSON 数组
 - `metric_prompt`: 给 agent 的指标解读提示
@@ -294,7 +322,8 @@ printf '%s\n' '{"run_id": 1}' | trainee call runs_get --input -
 [
   {
     "name": "total_loss",
-    "source": "log_regex",
+    "source": "log_file_regex",
+    "path": ".trainee/logs/*.log",
     "key_or_pattern": "total_loss=(?P<value>-?\\d+(?:\\.\\d+)?)",
     "goal": "min",
     "required": true
@@ -302,13 +331,21 @@ printf '%s\n' '{"run_id": 1}' | trainee call runs_get --input -
 ]
 ```
 
+`metric_specs.source` 常用值：
+
+- `stdout_regex`: 只从 Trainee 捕获的子进程 stdout/stderr 内部日志中按正则抽取。
+- `log_file_regex`: 从 `path` 或 `paths` 指定的日志文件/glob 中按正则抽取；glob 会在评估时重新展开。
+- `jsonl`: 从 `path` 或 `paths` 指定的 JSONL 文件中读取最后一个可解析数值，`key_or_pattern` 为字段名或点分路径。
+- `log_regex`: 旧版兼容来源，会读取内部日志和 `log_paths`。
+
 ## 全局配置与 LLM Provider
 
 Trainee 的项目初始化目录和全局配置目录是分开的：
 
 - 在训练项目目录执行 `trainee init`，例如 `cd ~/project/toymodel && trainee init`，Trainee 会读取当前目录并生成项目内 `.trainee/` 文件。
-- 普通 `trainee serve` 不读取当前目录，只打开全局 runtime/settings。
-- 全局运行数据默认放在 `~/.trainee`，包括 `runtime.sqlite3`、`artifacts/` 和 `config.json`。
+- 普通 `trainee serve` 不读取当前目录，也不会自动初始化当前目录。
+- Provider 全局配置默认放在 `~/.trainee/config.json`。
+- 项目运行数据默认放在项目内 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/`；`TRAINEE_DATA_DIR` 只覆盖运行数据目录，不影响 Provider 配置位置。
 - Provider 设置优先级为：进程环境变量最高，`~/.trainee/config.json` 其次。
 - 项目不读取 `.env` 文件；Web UI 保存 provider 设置时只写 `~/.trainee/config.json`。
 
@@ -372,36 +409,6 @@ Trainee 的项目初始化目录和全局配置目录是分开的：
 - `anthropic` provider 调用 `ANTHROPIC_BASE_URL/v1/messages`，使用 Claude Messages API 生成结构化 `AgentDecision`。
 - 如果没有配置 LLM，runtime 会回退到一个保守的启发式策略，优先调整 `lr` / `learning_rate` 一类参数。
 
-相关环境变量：
-
-- `TRAINEE_DATA_DIR`
-- `TRAINEE_LLM_PROVIDER`
-- `LLM_PROVIDER`
-- `MOONSHOT_API_KEY`
-- `MOONSHOT_BASE_URL`
-- `MOONSHOT_MODEL`
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_BASE_URL`
-- `ANTHROPIC_MODEL`
-- `ANTHROPIC_VERSION`
-- `ANTHROPIC_MAX_TOKENS`
-- `TRAINEE_LLM_TIMEOUT_SEC`
-
-## API
-
-- `POST /api/project/register`
-- `POST /api/project/context`
-- `GET /api/project`
-- `GET/POST /api/runtime/provider`
-- `POST /api/loop/start`
-- `POST /api/loop/stop`
-- `GET /api/loop`
-- `GET /api/runs`
-- `GET /api/runs/{id}`
-- `GET /api/events`
 
 ## 测试
 

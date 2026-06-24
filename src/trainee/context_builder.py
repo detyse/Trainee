@@ -46,7 +46,11 @@ class ContextBuilder:
         if detected_data_dirs:
             data_lines.append("Detected project data directories: " + ", ".join(detected_data_dirs))
         if spec.log_paths:
-            data_lines.append("Configured log paths: " + ", ".join(spec.log_paths))
+            data_lines.append("Configured legacy log paths: " + ", ".join(spec.log_paths))
+        if spec.signal_log_paths():
+            data_lines.append("Configured signal log paths: " + ", ".join(spec.signal_log_paths()))
+        if spec.metric_log_paths():
+            data_lines.append("Configured metric log paths: " + ", ".join(spec.metric_log_paths()))
         if detected_log_dirs:
             data_lines.append("Detected log directories: " + ", ".join(detected_log_dirs))
         data_summary = "\n".join(data_lines) or "No data or log directories were identified yet."
@@ -85,7 +89,14 @@ class ContextBuilder:
             result_lines.append("Metric prompt: " + spec.metric_prompt.strip())
         result_lines.append("W&B tracking is enabled." if spec.wandb_enabled else "W&B tracking is disabled.")
         if spec.log_paths:
-            result_lines.append("Inspect logs from: " + ", ".join(spec.log_paths))
+            result_lines.append("Legacy log paths: " + ", ".join(spec.log_paths))
+        if spec.signal_sources:
+            result_lines.append(
+                "Signal sources: "
+                + " | ".join(f"{item.type}: {', '.join(item.configured_paths()) or 'process output'}" for item in spec.signal_sources)
+            )
+        if spec.metric_log_paths():
+            result_lines.append("Metric log files: " + ", ".join(spec.metric_log_paths()))
         result_reading_summary = "\n".join(result_lines)
 
         return ProjectContext(

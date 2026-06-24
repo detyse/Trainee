@@ -11,16 +11,32 @@ from trainee.models import MetricSpec, ProjectContext, ProjectSpec, RoundRecord,
 from trainee.settings import Settings, load_settings
 
 
-def test_load_settings_defaults_data_dir_to_home(tmp_path, monkeypatch):
+def test_load_settings_defaults_runtime_data_to_repo_and_config_to_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("TRAINEE_DATA_DIR", raising=False)
 
     settings = load_settings(repo_root=tmp_path / "repo")
 
-    assert settings.data_dir == tmp_path / ".trainee"
-    assert settings.database_path == tmp_path / ".trainee" / "runtime.sqlite3"
-    assert settings.artifacts_dir == tmp_path / ".trainee" / "artifacts"
-    assert settings.config_path == tmp_path / ".trainee" / "config.json"
+    assert settings.project_data_dir == tmp_path / "repo" / ".trainee"
+    assert settings.data_dir == settings.project_data_dir
+    assert settings.database_path == tmp_path / "repo" / ".trainee" / "runtime.sqlite3"
+    assert settings.artifacts_dir == tmp_path / "repo" / ".trainee" / "artifacts"
+    assert settings.global_config_path == tmp_path / ".trainee" / "config.json"
+    assert settings.config_path == settings.global_config_path
+
+
+def test_load_settings_uses_project_root_for_runtime_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("TRAINEE_DATA_DIR", raising=False)
+    project_root = tmp_path / "project"
+
+    settings = load_settings(repo_root=tmp_path / "repo", project_root=project_root)
+
+    assert settings.project_root == project_root
+    assert settings.project_data_dir == project_root / ".trainee"
+    assert settings.database_path == project_root / ".trainee" / "runtime.sqlite3"
+    assert settings.artifacts_dir == project_root / ".trainee" / "artifacts"
+    assert settings.global_config_path == tmp_path / "home" / ".trainee" / "config.json"
 
 
 def test_load_settings_is_not_project_bound_by_default(tmp_path, monkeypatch):
@@ -33,7 +49,8 @@ def test_load_settings_is_not_project_bound_by_default(tmp_path, monkeypatch):
 
     assert settings.project_root is None
     assert settings.repo_root != tmp_path / "project"
-    assert settings.data_dir == tmp_path / "home" / ".trainee"
+    assert settings.global_config_path == tmp_path / "home" / ".trainee" / "config.json"
+    assert settings.data_dir == settings.repo_root / ".trainee"
 
 
 def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
@@ -76,6 +93,7 @@ def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
     settings = load_settings(repo_root=tmp_path)
 
     assert settings.config_path == tmp_path / ".trainee" / "config.json"
+    assert settings.global_config_path == tmp_path / ".trainee" / "config.json"
     assert settings.llm_provider == "none"
     assert settings.anthropic_api_key is None
     assert settings.anthropic_base_url == "https://api.anthropic.com"
@@ -125,13 +143,25 @@ def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
 
     assert settings.repo_root == tmp_path / "project"
     assert settings.project_root is None
-    assert settings.data_dir == tmp_path / "home" / ".trainee"
+    assert settings.data_dir == tmp_path / "project" / ".trainee"
     assert settings.config_path == config_path
     assert settings.llm_provider == "openai"
     assert settings.openai_api_key == "config-openai-key"
     assert settings.openai_base_url == "https://openai.example/v1"
     assert settings.openai_model == "gpt-custom"
     assert settings.llm_timeout_sec == 22.0
+
+
+def test_trainee_data_dir_overrides_runtime_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TRAINEE_DATA_DIR", "custom-runtime")
+
+    settings = load_settings(repo_root=tmp_path / "repo", project_root=tmp_path / "project")
+
+    assert settings.project_data_dir == tmp_path / "repo" / "custom-runtime"
+    assert settings.database_path == tmp_path / "repo" / "custom-runtime" / "runtime.sqlite3"
+    assert settings.artifacts_dir == tmp_path / "repo" / "custom-runtime" / "artifacts"
+    assert settings.global_config_path == tmp_path / "home" / ".trainee" / "config.json"
 
 
 def test_load_settings_reads_moonshot_provider(tmp_path, monkeypatch):
@@ -255,12 +285,12 @@ def test_decision_engine_uses_moonshot_chat_completions(monkeypatch):
     settings = Settings(
         repo_root=fake_root,
         project_root=None,
-        data_dir=fake_root / ".trainee",
+        project_data_dir=fake_root / ".trainee",
         database_path=fake_root / ".trainee" / "runtime.sqlite3",
         artifacts_dir=fake_root / ".trainee" / "artifacts",
         template_dir=fake_root,
         static_dir=fake_root,
-        config_path=fake_root / ".trainee" / "config.json",
+        global_config_path=fake_root / "home" / ".trainee" / "config.json",
         llm_provider="moonshot",
         llm_timeout_sec=12.0,
         openai_api_key=None,
@@ -322,6 +352,18 @@ def test_decision_engine_uses_moonshot_chat_completions(monkeypatch):
     assert captured["json"]["model"] == "kimi-k2.6"
     assert captured["json"]["messages"][0]["role"] == "system"
     assert "JSON only" in captured["json"]["messages"][0]["content"]
+    user_prompt = captured["json"]["messages"][1]["content"]
+    assert user_prompt.startswith("<STATIC_CONTEXT>\n")
+    assert "\n</STATIC_CONTEXT>\n\n<DYNAMIC_ROUND_STATE>\n" in user_prompt
+    assert '"tuning_prompt":"Try smaller lr when loss gets worse."' in user_prompt
+
+    prompt_a = engine._build_prompt(spec, context, history, {"lr": 0.2})
+    prompt_b = engine._build_prompt(spec, context, history, {"lr": 0.12})
+    static_a = prompt_a.split("\n</STATIC_CONTEXT>", 1)[0]
+    static_b = prompt_b.split("\n</STATIC_CONTEXT>", 1)[0]
+    assert static_a == static_b
+    assert '"current_params":{"lr":0.2}' in prompt_a
+    assert '"current_params":{"lr":0.12}' in prompt_b
 
 
 def test_decision_engine_uses_anthropic_messages_api(monkeypatch):
@@ -368,12 +410,12 @@ def test_decision_engine_uses_anthropic_messages_api(monkeypatch):
     settings = Settings(
         repo_root=fake_root,
         project_root=None,
-        data_dir=fake_root / ".trainee",
+        project_data_dir=fake_root / ".trainee",
         database_path=fake_root / ".trainee" / "runtime.sqlite3",
         artifacts_dir=fake_root / ".trainee" / "artifacts",
         template_dir=fake_root,
         static_dir=fake_root,
-        config_path=fake_root / ".trainee" / "config.json",
+        global_config_path=fake_root / "home" / ".trainee" / "config.json",
         llm_provider="anthropic",
         llm_timeout_sec=12.0,
         openai_api_key=None,

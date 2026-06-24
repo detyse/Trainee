@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from trainee.models import RunSession
+
 REGISTER_PAYLOAD_TEMPLATE = {
     "security_mode": "unsafe",
     "heartbeat_interval_sec": 0.1,
@@ -68,13 +70,15 @@ def test_prompt_preview_api_shows_model_request(runtime_env):
     assert preview["status"] == "preview"
     assert preview["provider"] == "none"
     assert "JSON only" in preview["system_prompt"]
-    assert '"tuning_prompt": "Lower lr if loss gets worse."' in preview["user_prompt"]
+    assert preview["user_prompt"].startswith("<STATIC_CONTEXT>\n")
+    assert "\n</STATIC_CONTEXT>\n\n<DYNAMIC_ROUND_STATE>\n" in preview["user_prompt"]
+    assert '"tuning_prompt":"Lower lr if loss gets worse."' in preview["user_prompt"]
     assert preview["payload"]["user"] == preview["user_prompt"]
 
 
 def test_runtime_provider_settings_save_to_config_json(runtime_env):
     client = runtime_env["client"]
-    data_dir = runtime_env["data_dir"]
+    config_path = runtime_env["config_path"]
 
     response = client.post(
         "/ui/runtime/provider",
@@ -96,7 +100,7 @@ def test_runtime_provider_settings_save_to_config_json(runtime_env):
     )
 
     assert response.status_code == 200
-    config = json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
+    config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["llm_provider"] == "openai"
     assert config["llm_timeout_sec"] == 12.0
     assert config["openai"]["api_key"] == "test-openai-key"
@@ -110,7 +114,7 @@ def test_runtime_provider_settings_save_to_config_json(runtime_env):
 
 def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runtime_env):
     client = runtime_env["client"]
-    data_dir = runtime_env["data_dir"]
+    config_path = runtime_env["config_path"]
 
     response = client.post(
         "/api/runtime/provider",
@@ -132,10 +136,64 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
     assert payload["moonshot_key_configured"] is True
     assert "api_key" not in json.dumps(payload)
 
-    config = json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
+    config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["llm_provider"] == "moonshot"
     assert config["moonshot"]["api_key"] == "moonshot-secret"
     assert client.get("/api/health").json()["llm_provider"] == "moonshot"
+
+
+def test_llm_image_probe_is_limited_per_session(runtime_env):
+    client = runtime_env["client"]
+    runtime = client.app.state.runtime
+    session = runtime.storage.create_session(RunSession(status="running"))
+    assert session.id is not None
+
+    async def fake_probe(prompt: str, image=None):
+        return {
+            "provider": "fake",
+            "model": "fake-vision",
+            "has_image": image is not None,
+            "content": prompt,
+        }
+
+    runtime.decision_engine.probe = fake_probe
+
+    for expected_count in (1, 2, 3):
+        response = client.post(
+            "/api/llm/test",
+            data={"prompt": "describe", "session_id": str(session.id)},
+            files={"image": ("probe.png", b"fake-image", "image/png")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["has_image"] is True
+        assert payload["image_analysis"] == {
+            "session_id": session.id,
+            "used": expected_count,
+            "limit": 3,
+        }
+
+    limited = client.post(
+        "/api/llm/test",
+        data={"prompt": "describe", "session_id": str(session.id)},
+        files={"image": ("probe.png", b"fake-image", "image/png")},
+    )
+    assert limited.status_code == 429
+    assert "image analysis limit reached" in limited.json()["detail"]
+
+    text_only = client.post("/api/llm/test", data={"prompt": "ping", "session_id": str(session.id)})
+    assert text_only.status_code == 200
+    assert text_only.json()["has_image"] is False
+
+    saved = runtime.storage.get_session(session.id)
+    assert saved is not None
+    assert saved.image_analysis_count == 3
+
+    session.status = "stopped"
+    runtime.storage.update_session(session)
+    saved = runtime.storage.get_session(session.id)
+    assert saved is not None
+    assert saved.image_analysis_count == 3
 
 
 def test_prompt_presets_are_project_scoped_and_apply_to_project(runtime_env):

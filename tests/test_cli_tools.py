@@ -64,6 +64,27 @@ def test_init_project_initializes_project_files(tmp_path):
     assert "Toy Model" in context_md
     assert trainee_dir / "project.json" in result["files_written"]
     assert project / "README.md" in result["files_read"]
+    assert result["already_initialized"] is False
+
+
+def test_init_project_detects_initialized_project_and_keeps_files(tmp_path):
+    project = tmp_path / "toymodel"
+    trainee_dir = project / ".trainee"
+    trainee_dir.mkdir(parents=True)
+    (trainee_dir / "project.json").write_text('{"custom": true}\n', encoding="utf-8")
+    (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
+    (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
+
+    result = init_project(project)
+
+    assert result["already_initialized"] is True
+    assert result["files_written"] == []
+    assert set(result["files_skipped"]) == {
+        trainee_dir / "project.json",
+        trainee_dir / "context.md",
+        trainee_dir / "README.md",
+    }
+    assert (trainee_dir / "project.json").read_text(encoding="utf-8") == '{"custom": true}\n'
 
 
 def test_init_command_prints_agent_style_activity(tmp_path, capsys):
@@ -78,7 +99,24 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     assert "Trainee init" in output
     assert "- Read: train.py" in output
     assert "- Wrote: .trainee/project.json" in output
+    assert "- Next: review .trainee/context.md and .trainee/project.json, then run `trainee run`" in output
     assert "uvicorn" not in output.lower()
+
+
+def test_init_command_reports_already_initialized_project(tmp_path, capsys):
+    project = tmp_path / "toymodel"
+    trainee_dir = project / ".trainee"
+    trainee_dir.mkdir(parents=True)
+    (trainee_dir / "project.json").write_text("{}\n", encoding="utf-8")
+    (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
+    (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
+
+    exit_code = main(["init", str(project)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "- Status: already initialized; kept existing project files" in output
+    assert "- Kept: .trainee/project.json" in output
 
 
 def test_launch_alias_still_initializes_project(tmp_path, capsys):

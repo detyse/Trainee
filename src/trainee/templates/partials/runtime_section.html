@@ -49,8 +49,8 @@
         <input type="number" step="0.1" min="0.1" name="llm_timeout_sec" value="{{ runtime_settings.llm_timeout_sec }}" />
       </label>
       <div>
-        <span class="label">Config file</span>
-        <code>{{ runtime_settings.config_path }}</code>
+        <span class="label">Global config file</span>
+        <code>{{ runtime_settings.global_config_path }}</code>
       </div>
     </div>
 
@@ -163,8 +163,8 @@
         <code>{{ runtime_settings.launch_project_root }}</code>
       </div>
       <div>
-        <span class="label">Data dir</span>
-        <code>{{ runtime_settings.data_dir }}</code>
+        <span class="label">Project data dir</span>
+        <code>{{ runtime_settings.project_data_dir }}</code>
       </div>
       <div>
         <span class="label">Artifacts</span>

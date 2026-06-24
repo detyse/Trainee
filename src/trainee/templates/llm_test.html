@@ -34,6 +34,9 @@
           </div>
 
           <form id="llm-test-form" class="stacked-form" enctype="multipart/form-data">
+            {% if image_analysis_session_id %}
+            <input type="hidden" name="session_id" value="{{ image_analysis_session_id }}" />
+            {% endif %}
             <label>
               <span>Prompt</span>
               <textarea name="prompt" rows="5" required>Describe the image if one is attached. Otherwise, reply with a short API connectivity message.</textarea>

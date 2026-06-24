@@ -82,6 +82,23 @@ def test_launcher_analysis_accepts_trainee_output_and_bounded_params(tmp_path: P
     assert "tunable params are bounded" in messages
 
 
+def test_launcher_analysis_accepts_round_workspace_output(tmp_path: Path) -> None:
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="python scripts/trainee_launch.py --config-out {config_path} --output_dir {round_dir} {extra_args}",
+        tunable_params=[
+            TunableParam(name="lr", flag="--lr", type="float", min_value=0.0, max_value=1.0),
+        ],
+    )
+
+    section = _check_launcher(tmp_path, spec)
+    messages = [finding.message for finding in section.findings]
+
+    assert "output_dir points to .trainee/runs" in messages
+    assert not any("may write outside .trainee" in message for message in messages)
+
+
 def test_environment_detects_uv_without_running_sync(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     calls: list[list[str]] = []

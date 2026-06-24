@@ -340,6 +340,10 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
         working_dir=str(project_root),
         launcher_template=_default_launcher_template(project_root),
         log_paths=[".trainee/logs/**/*.log", ".trainee/runs/**/*.log"],
+        signal_sources=[
+            {"type": "stdout"},
+            {"type": "log_file_mtime", "paths": [".trainee/logs/**/*.log", ".trainee/runs/**/*.log"]},
+        ],
     )
     context = ContextBuilder().build(spec)
     files_read = _launch_read_targets(project_root)
@@ -349,6 +353,7 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
         trainee_dir / "context.md": _render_context_markdown(context),
         trainee_dir / "README.md": _render_launch_readme(project_root),
     }
+    already_initialized = all(path.exists() for path in outputs)
     written: list[Path] = []
     skipped: list[Path] = []
     for path, content in outputs.items():
@@ -364,6 +369,7 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
         "files_read": files_read,
         "files_written": written,
         "files_skipped": skipped,
+        "already_initialized": already_initialized,
         "launcher_template": spec.launcher_template,
         "warnings": context.warnings,
     }
@@ -384,8 +390,7 @@ async def run_project(project_root: Path, security_mode: str = "guarded") -> dic
         raise ValueError(f"{spec_path} must contain a JSON object")
     spec = ProjectSpec.model_validate(payload).model_copy(update={"security_mode": security_mode})
 
-    trainee_dir = project_root / ".trainee"
-    settings = load_settings(repo_root=project_root, data_dir=trainee_dir, project_root=project_root)
+    settings = load_settings(repo_root=project_root, project_root=project_root)
     storage = Storage(settings.database_path)
     runtime = RuntimeService(settings, storage, EventBus())
     try:
@@ -505,6 +510,8 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     project_root = Path(result["project_root"])
     print("Trainee init")
     print(f"- Project: {project_root}")
+    if result["already_initialized"] and not result["files_written"]:
+        print("- Status: already initialized; kept existing project files")
     for path in result["files_read"]:
         print(f"- Read: {Path(path).relative_to(project_root)}")
     if not result["files_read"]:
@@ -515,6 +522,7 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
         print(f"- Kept: {Path(path).relative_to(project_root)}")
     launcher = result["launcher_template"] or "set launcher_template in .trainee/project.json"
     print(f"- Launcher: {launcher}")
+    print("- Next: review .trainee/context.md and .trainee/project.json, then run `trainee run`")
     for warning in result["warnings"]:
         print(f"- Warning: {warning}")
 
@@ -583,7 +591,15 @@ def _render_launch_readme(project_root: Path) -> str:
             "- `context.md`: generated project understanding for review.",
             "- `logs/`, `runs/`, and `artifacts/`: writable runtime outputs for guarded runs.",
             "",
-            "Launcher template variables: `{project_root}`, `{working_dir}`, `{trainee_dir}`, `{extra_args}`.",
+            "Recommended workflow:",
+            "",
+            "1. Review and edit `context.md` so Trainee has the right project goal, constraints, and evaluation criteria.",
+            "2. Review and edit `project.json`, especially `launcher_template`, `tunable_params`, and `metric_specs`.",
+            "3. Run `trainee doctor` to check the project setup.",
+            "4. Run `trainee run` after the draft looks correct.",
+            "",
+            "Launcher template variables: `{project_root}`, `{working_dir}`, `{trainee_dir}`, `{session_id}`, `{round_index}`, `{session_dir}`, `{round_dir}`, `{config_path}`, `{extra_args}`.",
+            "`{session_dir}` and `{round_dir}` point inside `.trainee/runs/`; `{config_path}` defaults to `{round_dir}/config.yaml`.",
             "Guarded runs make the host filesystem read-only and keep writes inside this `.trainee/` directory.",
             "",
         ]

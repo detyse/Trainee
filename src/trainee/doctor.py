@@ -274,7 +274,7 @@ def _check_sandbox(project_root: Path, spec: ProjectSpec | None) -> DoctorSectio
 def _check_llm(project_root: Path) -> DoctorSection:
     section = DoctorSection("LLM")
     try:
-        settings = load_settings(repo_root=project_root, data_dir=project_root / ".trainee", project_root=project_root)
+        settings = load_settings(repo_root=project_root, project_root=project_root)
     except (OSError, ValueError) as exc:
         section.add("warn", f"LLM config could not be read: {exc}")
         return section
@@ -417,8 +417,16 @@ def _is_safe_trainee_path(value: str) -> bool:
         "./.trainee/",
         "{trainee_dir}",
         "{trainee_dir}/",
+        "{session_dir}",
+        "{session_dir}/",
+        "{round_dir}",
+        "{round_dir}/",
+        "{config_path}",
         "{project_root}/.trainee/",
         "$TRAINEE_DIR/",
+        "$TRAINEE_SESSION_DIR/",
+        "$TRAINEE_ROUND_DIR/",
+        "$TRAINEE_CONFIG_PATH",
     )
     return value == ".trainee" or value.startswith(safe_prefixes)
 
