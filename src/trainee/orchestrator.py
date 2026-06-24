@@ -12,6 +12,7 @@ from trainee.events import EventBus
 from trainee.executor import TrainingExecutor
 from trainee.models import EventMessage, LoopSnapshot, ProjectBundle, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
 from trainee.parsers import discover_wandb_summary, missing_required_metrics, parse_metrics_from_logs
+from trainee.providers import provider_settings_payload
 from trainee.reporter import ReportGenerator
 from trainee.settings import Settings
 from trainee.storage import Storage
@@ -182,7 +183,6 @@ class RuntimeService:
         }
 
     def _runtime_settings_payload(self) -> Dict[str, Any]:
-        provider = self.settings.llm_provider
         project_root = self.settings.project_root
         return {
             "launch_project_root": str(project_root) if project_root else "",
@@ -191,26 +191,8 @@ class RuntimeService:
             "database_path": str(self.settings.database_path),
             "artifacts_dir": str(self.settings.artifacts_dir),
             "config_path": str(self.settings.config_path),
-            "dotenv_path": str(self.settings.dotenv_path),
-            "llm_provider": provider,
-            "llm_timeout_sec": self.settings.llm_timeout_sec,
-            "active_model": self._model_for_provider(provider),
-            "openai_base_url": self.settings.openai_base_url,
-            "openai_model": self.settings.openai_model,
-            "openai_key_configured": bool(self.settings.openai_api_key),
-            "anthropic_base_url": self.settings.anthropic_base_url,
-            "anthropic_model": self.settings.anthropic_model,
-            "anthropic_version": self.settings.anthropic_version,
-            "anthropic_max_tokens": self.settings.anthropic_max_tokens,
-            "anthropic_key_configured": bool(self.settings.anthropic_api_key),
+            **provider_settings_payload(self.settings),
         }
-
-    def _model_for_provider(self, provider: str) -> str:
-        if provider == "openai":
-            return self.settings.openai_model
-        if provider == "anthropic":
-            return self.settings.anthropic_model
-        return "n/a"
 
     def _launch_project_context_preview(self) -> ProjectContext:
         if self._launch_context_preview is None:
@@ -272,6 +254,7 @@ class RuntimeService:
         )
         return session, start_round, initial_params
 
+    # here is the main loop function
     async def _run_session(
         self,
         session_id: int,
@@ -302,6 +285,7 @@ class RuntimeService:
                 await self._finish_session(session_id, "stopped", "Reached max_rounds.")
                 return
 
+            # !! agent loop here
             while True:
                 session = self.storage.get_session(session_id)
                 if session is None:

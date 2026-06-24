@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Literal
 
-from dotenv import dotenv_values
+LLMProvider = Literal["none", "moonshot", "openai", "anthropic"]
 
-LLMProvider = Literal["none", "openai", "anthropic"]
+DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
+DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,6 @@ class Settings:
     template_dir: Path
     static_dir: Path
     config_path: Path
-    dotenv_path: Path
     llm_provider: LLMProvider
     llm_timeout_sec: float
     openai_api_key: str | None
@@ -32,6 +32,9 @@ class Settings:
     anthropic_model: str
     anthropic_version: str
     anthropic_max_tokens: int
+    moonshot_api_key: str | None = None
+    moonshot_base_url: str = DEFAULT_MOONSHOT_BASE_URL
+    moonshot_model: str = DEFAULT_MOONSHOT_MODEL
 
 
 def load_settings(
@@ -44,13 +47,11 @@ def load_settings(
         project_root = Path(env_project_root)
     project_root = project_root.expanduser().resolve() if project_root is not None else None
     repo_root = (repo_root or project_root or Path(__file__).resolve().parents[2]).resolve()
-    dotenv_path = repo_root / ".env"
-    dotenv_payload = _read_dotenv(dotenv_path)
 
     data_dir = (
         data_dir.expanduser().resolve()
         if data_dir is not None
-        else _resolve_path(_env_value("TRAINEE_DATA_DIR", dotenv_payload, str(Path.home() / ".trainee")), repo_root)
+        else _resolve_path(os.getenv("TRAINEE_DATA_DIR", str(Path.home() / ".trainee")), repo_root)
     )
     config_path = data_dir / "config.json"
     config_payload = _read_config(config_path)
@@ -65,17 +66,19 @@ def load_settings(
         template_dir=Path(__file__).resolve().parent / "templates",
         static_dir=Path(__file__).resolve().parent / "static",
         config_path=config_path,
-        dotenv_path=dotenv_path,
-        llm_provider=_resolve_llm_provider(dotenv_payload, config_payload),
-        llm_timeout_sec=float(_settings_value("TRAINEE_LLM_TIMEOUT_SEC", dotenv_payload, config_payload, "30")),
-        openai_api_key=_settings_value("OPENAI_API_KEY", dotenv_payload, config_payload),
-        openai_base_url=_settings_value("OPENAI_BASE_URL", dotenv_payload, config_payload, "https://api.openai.com/v1"),
-        openai_model=_settings_value("OPENAI_MODEL", dotenv_payload, config_payload, "gpt-4o-mini"),
-        anthropic_api_key=_settings_value("ANTHROPIC_API_KEY", dotenv_payload, config_payload),
-        anthropic_base_url=_settings_value("ANTHROPIC_BASE_URL", dotenv_payload, config_payload, "https://api.anthropic.com"),
-        anthropic_model=_settings_value("ANTHROPIC_MODEL", dotenv_payload, config_payload, "claude-3-5-haiku-latest"),
-        anthropic_version=_settings_value("ANTHROPIC_VERSION", dotenv_payload, config_payload, "2023-06-01"),
-        anthropic_max_tokens=int(_settings_value("ANTHROPIC_MAX_TOKENS", dotenv_payload, config_payload, "1024")),
+        llm_provider=_resolve_llm_provider(config_payload),
+        llm_timeout_sec=float(_settings_value("TRAINEE_LLM_TIMEOUT_SEC", config_payload, "30")),
+        openai_api_key=_settings_value("OPENAI_API_KEY", config_payload),
+        openai_base_url=_settings_value("OPENAI_BASE_URL", config_payload, "https://api.openai.com/v1"),
+        openai_model=_settings_value("OPENAI_MODEL", config_payload, "gpt-4o-mini"),
+        moonshot_api_key=_settings_value("MOONSHOT_API_KEY", config_payload),
+        moonshot_base_url=_settings_value("MOONSHOT_BASE_URL", config_payload, DEFAULT_MOONSHOT_BASE_URL),
+        moonshot_model=_settings_value("MOONSHOT_MODEL", config_payload, DEFAULT_MOONSHOT_MODEL),
+        anthropic_api_key=_settings_value("ANTHROPIC_API_KEY", config_payload),
+        anthropic_base_url=_settings_value("ANTHROPIC_BASE_URL", config_payload, "https://api.anthropic.com"),
+        anthropic_model=_settings_value("ANTHROPIC_MODEL", config_payload, "claude-3-5-haiku-latest"),
+        anthropic_version=_settings_value("ANTHROPIC_VERSION", config_payload, "2023-06-01"),
+        anthropic_max_tokens=int(_settings_value("ANTHROPIC_MAX_TOKENS", config_payload, "1024")),
     )
 
 
@@ -87,7 +90,7 @@ def save_provider_config(config_path: Path, payload: Dict[str, Any]) -> None:
         if key in payload:
             config[key] = payload[key]
 
-    for provider in ("openai", "anthropic"):
+    for provider in ("openai", "moonshot", "anthropic"):
         provider_payload = payload.get(provider)
         if not isinstance(provider_payload, dict):
             continue
@@ -104,33 +107,26 @@ def save_provider_config(config_path: Path, payload: Dict[str, Any]) -> None:
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _resolve_llm_provider(dotenv_payload: Dict[str, str], config_payload: Dict[str, Any]) -> LLMProvider:
+def _resolve_llm_provider(config_payload: Dict[str, Any]) -> LLMProvider:
     requested = (
-        _settings_value("TRAINEE_LLM_PROVIDER", dotenv_payload, config_payload)
-        or _settings_value("LLM_PROVIDER", dotenv_payload, config_payload)
+        _settings_value("TRAINEE_LLM_PROVIDER", config_payload)
+        or _settings_value("LLM_PROVIDER", config_payload)
         or ""
     ).strip().lower()
     if requested:
-        if requested not in {"none", "openai", "anthropic"}:
-            raise ValueError("TRAINEE_LLM_PROVIDER must be one of: none, openai, anthropic")
+        if requested not in {"none", "moonshot", "openai", "anthropic"}:
+            raise ValueError("TRAINEE_LLM_PROVIDER must be one of: none, moonshot, openai, anthropic")
         return requested  # type: ignore[return-value]
 
-    if _settings_value("ANTHROPIC_API_KEY", dotenv_payload, config_payload) and not _settings_value(
-        "OPENAI_API_KEY", dotenv_payload, config_payload
-    ):
+    if _settings_value("MOONSHOT_API_KEY", config_payload):
+        return "moonshot"
+    if _settings_value("ANTHROPIC_API_KEY", config_payload) and not _settings_value("OPENAI_API_KEY", config_payload):
         return "anthropic"
-    if _settings_value("OPENAI_API_KEY", dotenv_payload, config_payload):
+    if _settings_value("OPENAI_API_KEY", config_payload):
         return "openai"
-    if _settings_value("ANTHROPIC_API_KEY", dotenv_payload, config_payload):
+    if _settings_value("ANTHROPIC_API_KEY", config_payload):
         return "anthropic"
     return "none"
-
-
-def _read_dotenv(dotenv_path: Path) -> Dict[str, str]:
-    if not dotenv_path.exists():
-        return {}
-    payload = dotenv_values(dotenv_path)
-    return {key: value for key, value in payload.items() if value is not None}
 
 
 def _read_config(config_path: Path) -> Dict[str, Any]:
@@ -145,13 +141,8 @@ def _read_config(config_path: Path) -> Dict[str, Any]:
     return payload
 
 
-def _env_value(name: str, dotenv_payload: Dict[str, str], default: str | None = None) -> str | None:
-    return os.getenv(name, dotenv_payload.get(name, default))
-
-
 def _settings_value(
     name: str,
-    dotenv_payload: Dict[str, str],
     config_payload: Dict[str, Any],
     default: str | None = None,
 ) -> str | None:
@@ -161,7 +152,7 @@ def _settings_value(
     config_value = _config_value(name, config_payload)
     if config_value is not None:
         return str(config_value)
-    return dotenv_payload.get(name, default)
+    return default
 
 
 def _config_value(name: str, config_payload: Dict[str, Any]) -> Any:
@@ -173,6 +164,9 @@ def _config_value(name: str, config_payload: Dict[str, Any]) -> Any:
         "OPENAI_API_KEY": ("openai", "api_key"),
         "OPENAI_BASE_URL": ("openai", "base_url"),
         "OPENAI_MODEL": ("openai", "model"),
+        "MOONSHOT_API_KEY": ("moonshot", "api_key"),
+        "MOONSHOT_BASE_URL": ("moonshot", "base_url"),
+        "MOONSHOT_MODEL": ("moonshot", "model"),
         "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
         "ANTHROPIC_BASE_URL": ("anthropic", "base_url"),
         "ANTHROPIC_MODEL": ("anthropic", "model"),

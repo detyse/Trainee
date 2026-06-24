@@ -74,6 +74,8 @@ class DecisionEngine:
     ) -> Tuple[Optional[AgentDecision], Optional[PromptPreview]]:
         if self.settings.llm_provider == "openai" and self.settings.openai_api_key:
             return await self._openai_decision(spec, context, history, current_params)
+        if self.settings.llm_provider == "moonshot" and self.settings.moonshot_api_key:
+            return await self._moonshot_decision(spec, context, history, current_params)
         if self.settings.llm_provider == "anthropic" and self.settings.anthropic_api_key:
             return await self._anthropic_decision(spec, context, history, current_params)
         return None, None
@@ -89,6 +91,22 @@ class DecisionEngine:
         prompt_preview = self.build_prompt_preview(spec, context, history, current_params, status="sent")
         try:
             content = await self._openai_complete(self._system_prompt(), prompt)
+            candidate = self._extract_json(content)
+            return AgentDecision.model_validate(candidate), prompt_preview
+        except Exception:
+            return None, prompt_preview.model_copy(update={"status": "provider_failed"})
+
+    async def _moonshot_decision(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        history: List[RoundRecord],
+        current_params: Dict[str, Any],
+    ) -> Tuple[Optional[AgentDecision], Optional[PromptPreview]]:
+        prompt = self._build_prompt(spec, context, history, current_params)
+        prompt_preview = self.build_prompt_preview(spec, context, history, current_params, status="sent")
+        try:
+            content = await self._moonshot_complete(self._system_prompt(), prompt)
             candidate = self._extract_json(content)
             return AgentDecision.model_validate(candidate), prompt_preview
         except Exception:
@@ -126,6 +144,17 @@ class DecisionEngine:
                 "content": content,
             }
 
+        if self.settings.llm_provider == "moonshot":
+            if not self.settings.moonshot_api_key:
+                raise ValueError("MOONSHOT_API_KEY is not configured")
+            content = await self._moonshot_complete(self._probe_system_prompt(), prompt, image=image)
+            return {
+                "provider": "moonshot",
+                "model": self.settings.moonshot_model,
+                "has_image": image is not None,
+                "content": content,
+            }
+
         if self.settings.llm_provider == "anthropic":
             if not self.settings.anthropic_api_key:
                 raise ValueError("ANTHROPIC_API_KEY is not configured")
@@ -155,6 +184,20 @@ class DecisionEngine:
         }
         url = self.settings.openai_base_url.rstrip("/") + "/chat/completions"
         headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
+        async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+
+    async def _moonshot_complete(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image: Optional[Dict[str, str]] = None,
+    ) -> str:
+        payload = self._moonshot_payload(system_prompt, user_prompt, image=image)
+        url = self.settings.moonshot_base_url.rstrip("/") + "/chat/completions"
+        headers = {"Authorization": f"Bearer {self.settings.moonshot_api_key}"}
         async with httpx.AsyncClient(timeout=self.settings.llm_timeout_sec) as client:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
@@ -334,6 +377,9 @@ class DecisionEngine:
         if provider == "openai":
             model = self.settings.openai_model
             payload = self._openai_payload(system_prompt, user_prompt)
+        elif provider == "moonshot":
+            model = self.settings.moonshot_model
+            payload = self._moonshot_payload(system_prompt, user_prompt)
         elif provider == "anthropic":
             model = self.settings.anthropic_model
             payload = self._anthropic_payload(system_prompt, user_prompt)
@@ -354,6 +400,21 @@ class DecisionEngine:
     ) -> Dict[str, Any]:
         return {
             "model": self.settings.openai_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": self._openai_user_content(user_prompt, image)},
+            ],
+            "temperature": 0.2,
+        }
+
+    def _moonshot_payload(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "model": self.settings.moonshot_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": self._openai_user_content(user_prompt, image)},
@@ -421,3 +482,11 @@ class DecisionEngine:
         if start == -1 or end == -1 or end <= start:
             raise ValueError("no JSON object found in completion")
         return json.loads(content[start : end + 1])
+    
+    # add decision prompt here? 
+    def _decision_policy(self, ):
+        
+        return 
+    
+
+    

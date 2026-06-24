@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -13,9 +14,11 @@ import httpx
 import uvicorn
 
 from trainee.context_builder import ContextBuilder
+from trainee.doctor import format_doctor_report, run_doctor
 from trainee.events import EventBus
 from trainee.models import ProjectContext, ProjectSpec, PromptPreset
 from trainee.orchestrator import RuntimeService
+from trainee.providers import ProviderSettingsUpdate
 from trainee.settings import load_settings
 from trainee.storage import Storage
 
@@ -86,6 +89,20 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         method="GET",
         path="/api/project",
         input_schema=_empty_schema(),
+    ),
+    ToolDefinition(
+        name="runtime_provider_get",
+        description="Read the active LLM provider settings without exposing API keys.",
+        method="GET",
+        path="/api/runtime/provider",
+        input_schema=_empty_schema(),
+    ),
+    ToolDefinition(
+        name="runtime_provider_update",
+        description="Update the active LLM provider settings and persist them to config.json.",
+        method="POST",
+        path="/api/runtime/provider",
+        input_schema=ProviderSettingsUpdate.model_json_schema(),
     ),
     ToolDefinition(
         name="prompt_preview",
@@ -166,7 +183,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         host = getattr(args, "host", "127.0.0.1")
         port = getattr(args, "port", 8000)
         reload = getattr(args, "reload", False)
-        uvicorn.run("trainee.app:app", host=host, port=port, reload=reload)
+        run_web_service(host=host, port=port, reload=reload)
+        return 0
+
+    if command == "webui":
+        host = getattr(args, "host", "127.0.0.1")
+        port = getattr(args, "port", 8000)
+        reload = getattr(args, "reload", False)
+        open_browser = not getattr(args, "no_open", False)
+        run_web_service(host=host, port=port, reload=reload, open_browser=open_browser)
         return 0
 
     if command == "tools":
@@ -192,6 +217,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         _print_run_result(result)
         return 0 if result["status"] != "failed" else 1
+
+    if command == "doctor":
+        report = run_doctor(Path(args.project_root))
+        print(format_doctor_report(report), end="")
+        return 1 if report.has_failures else 0
 
     if command == "call":
         try:
@@ -223,6 +253,12 @@ def build_tool_manifest(tool_name: str | None = None, base_url: str = DEFAULT_BA
         "base_url": base_url,
         "tools": [definition.to_manifest_item() for definition in definitions],
     }
+
+
+def run_web_service(host: str = "127.0.0.1", port: int = 8000, reload: bool = False, open_browser: bool = False) -> None:
+    if open_browser:
+        webbrowser.open(_webui_url(host, port))
+    uvicorn.run("trainee.app:app", host=host, port=port, reload=reload)
 
 
 def load_tool_input(raw: str | None) -> dict[str, Any]:
@@ -296,6 +332,8 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
 
     trainee_dir = project_root / ".trainee"
     trainee_dir.mkdir(parents=True, exist_ok=True)
+    (trainee_dir / "runs").mkdir(parents=True, exist_ok=True)
+    (trainee_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     spec = ProjectSpec(
         project_root=str(project_root),
@@ -380,6 +418,13 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--reload", action="store_true", help="Enable uvicorn reload mode.")
     serve_parser.set_defaults(command="serve")
 
+    webui_parser = subparsers.add_parser("webui", help="Run the local web service and open the Web UI.")
+    webui_parser.add_argument("--host", default="127.0.0.1", help="Bind host.")
+    webui_parser.add_argument("--port", default=8000, type=int, help="Bind port.")
+    webui_parser.add_argument("--reload", action="store_true", help="Enable uvicorn reload mode.")
+    webui_parser.add_argument("--no-open", action="store_true", help="Start the service without opening a browser.")
+    webui_parser.set_defaults(command="webui")
+
     init_parser = subparsers.add_parser(
         "init",
         aliases=["launch"],
@@ -395,6 +440,10 @@ def _build_parser() -> argparse.ArgumentParser:
     security_group.add_argument("--guarded", action="store_true", help="Run with the default bubblewrap sandbox.")
     security_group.add_argument("--unsafe", action="store_true", help="Run without bubblewrap isolation.")
     run_parser.set_defaults(command="run")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Check whether a training project is ready for Trainee.")
+    doctor_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
+    doctor_parser.set_defaults(command="doctor")
 
     tools_parser = subparsers.add_parser("tools", help="Print tool-call compatible function schemas.")
     tools_parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Base URL to include in the manifest.")
@@ -432,6 +481,13 @@ def _render_tool_path(definition: ToolDefinition, payload: Mapping[str, Any]) ->
             raise ValueError(f"tool {definition.name!r} requires input field {param!r}")
         path = path.replace("{" + param + "}", quote(str(payload[param]), safe=""))
     return path
+
+
+def _webui_url(host: str, port: int) -> str:
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+    if ":" in browser_host and not browser_host.startswith("["):
+        browser_host = f"[{browser_host}]"
+    return f"http://{browser_host}:{port}/"
 
 
 def _response_body(response: httpx.Response) -> str:

@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+from trainee.cli import init_project, main
+from trainee.doctor import _check_environment, _check_launcher, format_doctor_report, run_doctor
+from trainee.models import ProjectSpec, TunableParam
+
+
+def test_doctor_reports_missing_project_scaffold(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    report = run_doctor(project)
+
+    assert report.has_failures
+    text = format_doctor_report(report)
+    assert "Trainee doctor" in text
+    assert "[fail] .trainee exists: missing" in text
+    assert "trainee init" in text
+
+
+def test_init_project_creates_doctor_required_directories(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+
+    init_project(project)
+
+    assert (project / ".trainee" / "runs").is_dir()
+    assert (project / ".trainee" / "logs").is_dir()
+
+
+def test_doctor_reports_invalid_project_json(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    trainee_dir = project / ".trainee"
+    (trainee_dir / "runs").mkdir(parents=True)
+    (trainee_dir / "logs").mkdir()
+    (trainee_dir / "project.json").write_text("{", encoding="utf-8")
+
+    report = run_doctor(project)
+
+    assert report.has_failures
+    assert "project.json is invalid" in format_doctor_report(report)
+
+
+def test_launcher_analysis_warns_on_unsafe_outputs_and_unbounded_params(tmp_path: Path) -> None:
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="python train.py --save_dir outputs > train.log {extra_args}",
+        tunable_params=[TunableParam(name="lr", flag="--lr", type="float")],
+    )
+
+    section = _check_launcher(tmp_path, spec)
+    messages = [finding.message for finding in section.findings]
+
+    assert "launcher has no output_dir" in messages
+    assert "launcher contains suspicious shell operator: >" in messages
+    assert "save_dir may write outside .trainee: outputs" in messages
+    assert "tunable params are not bounded: lr" in messages
+
+
+def test_launcher_analysis_accepts_trainee_output_and_bounded_params(tmp_path: Path) -> None:
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="python train.py --output_dir .trainee/runs/latest {extra_args}",
+        tunable_params=[
+            TunableParam(name="lr", flag="--lr", type="float", min_value=0.0, max_value=1.0),
+            TunableParam(name="optimizer", flag="--optimizer", type="str", choices=["adam", "sgd"]),
+            TunableParam(name="debug", flag="--debug", type="bool"),
+        ],
+    )
+
+    section = _check_launcher(tmp_path, spec)
+    messages = [finding.message for finding in section.findings]
+
+    assert "output_dir points to .trainee/runs" in messages
+    assert "tunable params are bounded" in messages
+
+
+def test_environment_detects_uv_without_running_sync(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        return "/usr/bin/uv" if name == "uv" else None
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="usage: uv sync", stderr="")
+
+    monkeypatch.setattr("trainee.doctor.shutil.which", fake_which)
+    monkeypatch.setattr("trainee.doctor.subprocess.run", fake_run)
+
+    section = _check_environment(tmp_path, None)
+
+    assert [finding.message for finding in section.findings] == [
+        "uv project detected",
+        "uv found: /usr/bin/uv",
+        "uv sync available",
+    ]
+    assert calls == [["/usr/bin/uv", "sync", "--help"]]
+
+
+def test_environment_detects_missing_venv_python(tmp_path: Path) -> None:
+    (tmp_path / ".venv").mkdir()
+
+    section = _check_environment(tmp_path, None)
+
+    assert any(finding.status == "fail" and finding.message == ".venv/bin/python not found" for finding in section.findings)
+
+
+def test_environment_detects_missing_conda_env(tmp_path: Path, monkeypatch) -> None:
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="conda run -n mousekin python train.py {extra_args}",
+    )
+
+    def fake_which(name: str) -> str | None:
+        return "/opt/conda/bin/conda" if name == "conda" else None
+
+    def fake_run(argv, **kwargs):
+        payload = {"envs": ["/opt/conda/envs/other"]}
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("trainee.doctor.shutil.which", fake_which)
+    monkeypatch.setattr("trainee.doctor.subprocess.run", fake_run)
+
+    section = _check_environment(tmp_path, spec)
+
+    assert any(finding.status == "fail" and finding.message == "conda env mousekin not found" for finding in section.findings)
+
+
+def test_doctor_cli_returns_nonzero_only_for_failures(tmp_path: Path, capsys, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    assert main(["doctor", str(project)]) == 1
+    assert "not ready" in capsys.readouterr().out
+
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    init_project(project)
+    project_json_path = project / ".trainee" / "project.json"
+    payload = json.loads(project_json_path.read_text(encoding="utf-8"))
+    payload["launcher_template"] = "python train.py --output_dir .trainee/runs/latest {extra_args}"
+    project_json_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def fake_which(name: str) -> str | None:
+        paths = {
+            "bwrap": "/usr/bin/bwrap",
+            "python3": "/usr/bin/python3",
+            "python": "/usr/bin/python",
+        }
+        return paths.get(name)
+
+    monkeypatch.setattr("trainee.doctor.shutil.which", fake_which)
+
+    assert main(["doctor", str(project)]) == 0
+    output = capsys.readouterr().out
+    assert "Trainee doctor" in output
+    assert "ready to run:" in output

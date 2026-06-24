@@ -39,6 +39,7 @@
         <span>Provider</span>
         <select name="llm_provider">
           <option value="none" {% if runtime_settings.llm_provider == "none" %}selected{% endif %}>none</option>
+          <option value="moonshot" {% if runtime_settings.llm_provider == "moonshot" %}selected{% endif %}>moonshot</option>
           <option value="openai" {% if runtime_settings.llm_provider == "openai" %}selected{% endif %}>openai</option>
           <option value="anthropic" {% if runtime_settings.llm_provider == "anthropic" %}selected{% endif %}>anthropic</option>
         </select>
@@ -78,6 +79,34 @@
           <label>
             <span>Model</span>
             <input type="text" name="openai_model" value="{{ runtime_settings.openai_model }}" />
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-box">
+        <div class="panel-header compact">
+          <div>
+            <p class="panel-kicker">Moonshot</p>
+            <h3>{{ runtime_settings.moonshot_model }}</h3>
+          </div>
+          <span class="status-pill">{{ "key set" if runtime_settings.moonshot_key_configured else "no key" }}</span>
+        </div>
+        <div class="stacked-form">
+          <label>
+            <span>API key</span>
+            <input type="password" name="moonshot_api_key" autocomplete="off" placeholder="{{ 'configured; leave blank to keep' if runtime_settings.moonshot_key_configured else 'sk-...' }}" />
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="clear_moonshot_api_key" />
+            <span>Clear Moonshot key from config.json</span>
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input type="url" name="moonshot_base_url" value="{{ runtime_settings.moonshot_base_url }}" />
+          </label>
+          <label>
+            <span>Model</span>
+            <input type="text" name="moonshot_model" value="{{ runtime_settings.moonshot_model }}" />
           </label>
         </div>
       </div>
@@ -143,11 +172,6 @@
       </div>
     </div>
   </div>
-
-  <details class="prompt-payload">
-    <summary>Compatibility env file</summary>
-    <code>{{ runtime_settings.dotenv_path }}</code>
-  </details>
 
   <pre id="health-check-output" class="prompt-pre">{{ health | tojson(indent=2) }}</pre>
 </section>

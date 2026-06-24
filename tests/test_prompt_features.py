@@ -84,6 +84,9 @@ def test_runtime_provider_settings_save_to_config_json(runtime_env):
             "openai_api_key": "test-openai-key",
             "openai_base_url": "https://openai.example/v1",
             "openai_model": "gpt-ui",
+            "moonshot_api_key": "test-moonshot-key",
+            "moonshot_base_url": "https://moonshot.example/v1",
+            "moonshot_model": "kimi-ui",
             "anthropic_base_url": "https://anthropic.example",
             "anthropic_model": "claude-ui",
             "anthropic_version": "2023-06-01",
@@ -99,7 +102,40 @@ def test_runtime_provider_settings_save_to_config_json(runtime_env):
     assert config["openai"]["api_key"] == "test-openai-key"
     assert config["openai"]["base_url"] == "https://openai.example/v1"
     assert config["openai"]["model"] == "gpt-ui"
+    assert config["moonshot"]["api_key"] == "test-moonshot-key"
+    assert config["moonshot"]["base_url"] == "https://moonshot.example/v1"
+    assert config["moonshot"]["model"] == "kimi-ui"
     assert client.get("/api/health").json()["llm_provider"] == "openai"
+
+
+def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runtime_env):
+    client = runtime_env["client"]
+    data_dir = runtime_env["data_dir"]
+
+    response = client.post(
+        "/api/runtime/provider",
+        json={
+            "llm_provider": "moonshot",
+            "llm_timeout_sec": 9,
+            "moonshot": {
+                "api_key": "moonshot-secret",
+                "base_url": "https://moonshot.example/v1",
+                "model": "kimi-api",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["llm_provider"] == "moonshot"
+    assert payload["active_model"] == "kimi-api"
+    assert payload["moonshot_key_configured"] is True
+    assert "api_key" not in json.dumps(payload)
+
+    config = json.loads((data_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["llm_provider"] == "moonshot"
+    assert config["moonshot"]["api_key"] == "moonshot-secret"
+    assert client.get("/api/health").json()["llm_provider"] == "moonshot"
 
 
 def test_prompt_presets_are_project_scoped_and_apply_to_project(runtime_env):

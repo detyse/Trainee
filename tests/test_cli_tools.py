@@ -5,6 +5,7 @@ import re
 
 import pytest
 
+import trainee.cli as cli
 from trainee.cli import build_tool_manifest, call_tool, init_project, load_tool_input, main
 
 
@@ -91,6 +92,32 @@ def test_launch_alias_still_initializes_project(tmp_path, capsys):
     assert exit_code == 0
     assert "Trainee init" in output
     assert (project / ".trainee" / "project.json").exists()
+
+
+def test_webui_command_opens_browser_and_starts_service(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_open(url):
+        captured["url"] = url
+        return True
+
+    def fake_run(app, host, port, reload):
+        captured["app"] = app
+        captured["host"] = host
+        captured["port"] = port
+        captured["reload"] = reload
+
+    monkeypatch.setattr(cli.webbrowser, "open", fake_open)
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+
+    exit_code = main(["webui", "--host", "0.0.0.0", "--port", "8765", "--reload"])
+
+    assert exit_code == 0
+    assert captured["url"] == "http://127.0.0.1:8765/"
+    assert captured["app"] == "trainee.app:app"
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 8765
+    assert captured["reload"] is True
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):

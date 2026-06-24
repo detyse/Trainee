@@ -20,21 +20,15 @@ Trainee 是一个面向训练自动化的 agent runtime。它不承载训练代�
 python3 -m pip install -e ".[dev]"
 ```
 
-2. 可选：从示例配置生成 `.env`：
-
-```bash
-cp .env.example .env
-```
-
-3. 启动服务：
+2. 启动服务：
 
 ```bash
 python3 main.py
 ```
 
-4. 打开 `http://127.0.0.1:8000`
+3. 打开 `http://127.0.0.1:8000`
 
-5. 填写外部训练项目配置。`launcher_template` 可以直接写完整命令，例如：
+4. 填写外部训练项目配置。`launcher_template` 可以直接写完整命令，例如：
 
 ```bash
 conda run -n trainer python {project_root}/train.py --config {project_root}/configs/base.yaml {extra_args}
@@ -62,8 +56,10 @@ uv tool update-shell
 
 ```bash
 trainee --help
-trainee serve --host 127.0.0.1 --port 8000
+trainee webui --host 127.0.0.1 --port 8000
 ```
+
+`trainee webui` 会启动本地服务并打开浏览器页面；只想启动服务、不打开浏览器时使用 `trainee serve`，或运行 `trainee webui --no-open`。
 
 `--editable` 会让全局命令直接指向当前源码目录。后续修改或拉取代码后，通常不需要重新安装，`trainee` 会直接使用新代码。
 
@@ -313,10 +309,24 @@ Trainee 的项目初始化目录和全局配置目录是分开的：
 - 在训练项目目录执行 `trainee init`，例如 `cd ~/project/toymodel && trainee init`，Trainee 会读取当前目录并生成项目内 `.trainee/` 文件。
 - 普通 `trainee serve` 不读取当前目录，只打开全局 runtime/settings。
 - 全局运行数据默认放在 `~/.trainee`，包括 `runtime.sqlite3`、`artifacts/` 和 `config.json`。
-- Provider 设置优先从 `~/.trainee/config.json` 读取；环境变量仍然拥有最高优先级。
-- 项目目录下的 `.env` 继续作为兼容输入读取，但 Web UI 保存 provider 设置时只写 `~/.trainee/config.json`。
+- Provider 设置优先级为：进程环境变量最高，`~/.trainee/config.json` 其次。
+- 项目不读取 `.env` 文件；Web UI 保存 provider 设置时只写 `~/.trainee/config.json`。
 
 未配置 LLM key 时，runtime 会自动回退到启发式调参。
+
+`~/.trainee/config.json` Moonshot / Kimi 示例：
+
+```json
+{
+  "llm_provider": "moonshot",
+  "llm_timeout_sec": 30,
+  "moonshot": {
+    "api_key": "sk-...",
+    "base_url": "https://api.moonshot.cn/v1",
+    "model": "kimi-k2.6"
+  }
+}
+```
 
 `~/.trainee/config.json` OpenAI-compatible 示例：
 
@@ -350,12 +360,14 @@ Trainee 的项目初始化目录和全局配置目录是分开的：
 
 如果不显式设置 `TRAINEE_LLM_PROVIDER`，runtime 会自动优先使用已存在的 key：
 
+- 有 `MOONSHOT_API_KEY` 时走 `moonshot`
 - 有 `OPENAI_API_KEY` 时走 `openai`
 - 只有 `ANTHROPIC_API_KEY` 时走 `anthropic`
-- 两者都没有时禁用 LLM，回退到启发式策略
+- 这些 key 都没有时禁用 LLM，回退到启发式策略
 
 ## LLM 决策
 
+- `moonshot` provider 调用 `MOONSHOT_BASE_URL/chat/completions`，默认使用 `kimi-k2.6` 生成结构化 `AgentDecision`。
 - `openai` provider 调用 `OPENAI_BASE_URL/chat/completions`，使用 `OPENAI_MODEL` 生成结构化 `AgentDecision`。
 - `anthropic` provider 调用 `ANTHROPIC_BASE_URL/v1/messages`，使用 Claude Messages API 生成结构化 `AgentDecision`。
 - 如果没有配置 LLM，runtime 会回退到一个保守的启发式策略，优先调整 `lr` / `learning_rate` 一类参数。
@@ -365,6 +377,9 @@ Trainee 的项目初始化目录和全局配置目录是分开的：
 - `TRAINEE_DATA_DIR`
 - `TRAINEE_LLM_PROVIDER`
 - `LLM_PROVIDER`
+- `MOONSHOT_API_KEY`
+- `MOONSHOT_BASE_URL`
+- `MOONSHOT_MODEL`
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
@@ -380,6 +395,7 @@ Trainee 的项目初始化目录和全局配置目录是分开的：
 - `POST /api/project/register`
 - `POST /api/project/context`
 - `GET /api/project`
+- `GET/POST /api/runtime/provider`
 - `POST /api/loop/start`
 - `POST /api/loop/stop`
 - `GET /api/loop`

@@ -18,6 +18,23 @@ from trainee.events import EventBus
 from trainee.logging import configure_logging, get_logger
 from trainee.models import ProjectContext, ProjectSpec, PromptPreset
 from trainee.orchestrator import RuntimeService
+from trainee.providers import (
+    DEFAULT_ANTHROPIC_BASE_URL,
+    DEFAULT_ANTHROPIC_MAX_TOKENS,
+    DEFAULT_ANTHROPIC_MODEL,
+    DEFAULT_ANTHROPIC_VERSION,
+    DEFAULT_LLM_TIMEOUT_SEC,
+    DEFAULT_MOONSHOT_BASE_URL,
+    DEFAULT_MOONSHOT_MODEL,
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_MODEL,
+    ProviderSettingsUpdate,
+    active_model,
+    build_provider_config_payload,
+    provider_is_configured,
+    provider_settings_payload,
+    provider_update_from_form,
+)
 from trainee.reporter import ReportGenerator
 from trainee.settings import Settings, load_settings, save_provider_config
 from trainee.storage import Storage
@@ -76,20 +93,14 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     @app.get("/llm-test", response_class=HTMLResponse)
     async def llm_test(request: Request) -> HTMLResponse:
         settings = request.app.state.settings
-        model = _llm_display_model(settings)
-        configured = (
-            settings.llm_provider == "openai" and bool(settings.openai_api_key)
-        ) or (
-            settings.llm_provider == "anthropic" and bool(settings.anthropic_api_key)
-        )
         return templates.TemplateResponse(
             request,
             "llm_test.html",
             {
                 "request": request,
                 "provider": settings.llm_provider,
-                "model": model,
-                "configured": configured,
+                "model": active_model(settings),
+                "configured": provider_is_configured(settings),
                 "max_image_mb": MAX_LLM_TEST_IMAGE_BYTES // (1024 * 1024),
             },
         )
@@ -163,6 +174,26 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     @app.get("/api/health")
     async def api_health(request: Request) -> JSONResponse:
         return JSONResponse(_health_payload(request))
+
+    @app.get("/api/runtime/provider")
+    async def api_get_provider_settings(request: Request) -> JSONResponse:
+        runtime = get_runtime(request)
+        return JSONResponse(provider_settings_payload(runtime.settings))
+
+    @app.post("/api/runtime/provider")
+    async def api_update_provider_settings(
+        request: Request,
+        update: ProviderSettingsUpdate,
+    ) -> JSONResponse:
+        runtime = get_runtime(request)
+        try:
+            updated_settings = _update_provider_settings(request, runtime, update)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return JSONResponse(provider_settings_payload(updated_settings))
 
     @app.get("/api/prompt-preview")
     async def api_get_prompt_preview(request: Request, run_id: Optional[int] = None) -> JSONResponse:
@@ -403,63 +434,46 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     async def ui_update_provider_settings(
         request: Request,
         llm_provider: str = Form("none"),
-        llm_timeout_sec: float = Form(30.0),
+        llm_timeout_sec: float = Form(DEFAULT_LLM_TIMEOUT_SEC),
         openai_api_key: str = Form(""),
         clear_openai_api_key: Optional[str] = Form(None),
-        openai_base_url: str = Form("https://api.openai.com/v1"),
-        openai_model: str = Form("gpt-4o-mini"),
+        openai_base_url: str = Form(DEFAULT_OPENAI_BASE_URL),
+        openai_model: str = Form(DEFAULT_OPENAI_MODEL),
+        moonshot_api_key: str = Form(""),
+        clear_moonshot_api_key: Optional[str] = Form(None),
+        moonshot_base_url: str = Form(DEFAULT_MOONSHOT_BASE_URL),
+        moonshot_model: str = Form(DEFAULT_MOONSHOT_MODEL),
         anthropic_api_key: str = Form(""),
         clear_anthropic_api_key: Optional[str] = Form(None),
-        anthropic_base_url: str = Form("https://api.anthropic.com"),
-        anthropic_model: str = Form("claude-3-5-haiku-latest"),
-        anthropic_version: str = Form("2023-06-01"),
-        anthropic_max_tokens: int = Form(1024),
+        anthropic_base_url: str = Form(DEFAULT_ANTHROPIC_BASE_URL),
+        anthropic_model: str = Form(DEFAULT_ANTHROPIC_MODEL),
+        anthropic_version: str = Form(DEFAULT_ANTHROPIC_VERSION),
+        anthropic_max_tokens: int = Form(DEFAULT_ANTHROPIC_MAX_TOKENS),
     ) -> HTMLResponse:
         runtime = get_runtime(request)
-        if runtime.loop_is_running():
-            raise HTTPException(status_code=409, detail="stop the loop before changing provider settings")
-        provider = llm_provider.strip().lower()
-        if provider not in {"none", "openai", "anthropic"}:
-            raise HTTPException(status_code=400, detail="provider must be one of: none, openai, anthropic")
-        if llm_timeout_sec <= 0:
-            raise HTTPException(status_code=400, detail="timeout must be positive")
-        if anthropic_max_tokens <= 0:
-            raise HTTPException(status_code=400, detail="anthropic max tokens must be positive")
-
-        provider_payload: Dict[str, Any] = {
-            "llm_provider": provider,
-            "llm_timeout_sec": llm_timeout_sec,
-            "openai": {
-                "base_url": openai_base_url.strip() or "https://api.openai.com/v1",
-                "model": openai_model.strip() or "gpt-4o-mini",
-            },
-            "anthropic": {
-                "base_url": anthropic_base_url.strip() or "https://api.anthropic.com",
-                "model": anthropic_model.strip() or "claude-3-5-haiku-latest",
-                "version": anthropic_version.strip() or "2023-06-01",
-                "max_tokens": anthropic_max_tokens,
-            },
-        }
-        if clear_openai_api_key is not None:
-            provider_payload["openai"]["api_key"] = None
-        elif openai_api_key.strip():
-            provider_payload["openai"]["api_key"] = openai_api_key.strip()
-        if clear_anthropic_api_key is not None:
-            provider_payload["anthropic"]["api_key"] = None
-        elif anthropic_api_key.strip():
-            provider_payload["anthropic"]["api_key"] = anthropic_api_key.strip()
-
+        update = provider_update_from_form(
+            llm_provider=llm_provider,
+            llm_timeout_sec=llm_timeout_sec,
+            openai_api_key=openai_api_key,
+            clear_openai_api_key=clear_openai_api_key is not None,
+            openai_base_url=openai_base_url,
+            openai_model=openai_model,
+            moonshot_api_key=moonshot_api_key,
+            clear_moonshot_api_key=clear_moonshot_api_key is not None,
+            moonshot_base_url=moonshot_base_url,
+            moonshot_model=moonshot_model,
+            anthropic_api_key=anthropic_api_key,
+            clear_anthropic_api_key=clear_anthropic_api_key is not None,
+            anthropic_base_url=anthropic_base_url,
+            anthropic_model=anthropic_model,
+            anthropic_version=anthropic_version,
+            anthropic_max_tokens=anthropic_max_tokens,
+        )
         try:
-            save_provider_config(runtime.settings.config_path, provider_payload)
-            updated_settings = load_settings(
-                repo_root=runtime.settings.repo_root,
-                data_dir=runtime.settings.data_dir,
-                project_root=runtime.settings.project_root,
-            )
+            _update_provider_settings(request, runtime, update)
         except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        request.app.state.settings = updated_settings
-        runtime.update_settings(updated_settings)
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
     @app.post("/ui/loop/start")
@@ -482,6 +496,25 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
 
 def get_runtime(request: Request) -> RuntimeService:
     return request.app.state.runtime  # type: ignore[return-value]
+
+
+def _update_provider_settings(
+    request: Request,
+    runtime: RuntimeService,
+    update: ProviderSettingsUpdate,
+) -> Settings:
+    if runtime.loop_is_running():
+        raise ValueError("stop the loop before changing provider settings")
+    provider_payload = build_provider_config_payload(update)
+    save_provider_config(runtime.settings.config_path, provider_payload)
+    updated_settings = load_settings(
+        repo_root=runtime.settings.repo_root,
+        data_dir=runtime.settings.data_dir,
+        project_root=runtime.settings.project_root,
+    )
+    request.app.state.settings = updated_settings
+    runtime.update_settings(updated_settings)
+    return updated_settings
 
 
 def _health_payload(request: Request) -> Dict[str, Any]:
@@ -593,14 +626,6 @@ def _coerce_bool(value: Any) -> bool:
 
 def _format_sse(event_name: str, payload: Dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-def _llm_display_model(settings: Settings) -> str:
-    if settings.llm_provider == "openai":
-        return settings.openai_model
-    if settings.llm_provider == "anthropic":
-        return settings.anthropic_model
-    return "none"
 
 
 async def _read_llm_test_image(image: Optional[UploadFile]) -> Optional[Dict[str, str]]:

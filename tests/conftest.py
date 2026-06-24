@@ -75,7 +75,6 @@ def runtime_env(tmp_path: Path) -> dict[str, object]:
         template_dir=repo_root / "src" / "trainee" / "templates",
         static_dir=repo_root / "src" / "trainee" / "static",
         config_path=data_dir / "config.json",
-        dotenv_path=repo_root / ".env",
         llm_provider="none",
         llm_timeout_sec=5.0,
         openai_api_key=None,

@@ -232,7 +232,6 @@ def _settings(tmp_path: Path) -> Settings:
         template_dir=tmp_path,
         static_dir=tmp_path,
         config_path=tmp_path / ".trainee" / "config.json",
-        dotenv_path=tmp_path / ".env",
         llm_provider="none",
         llm_timeout_sec=5.0,
         openai_api_key=None,
