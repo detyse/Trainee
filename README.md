@@ -59,8 +59,11 @@ uv tool update-shell
 
 ```bash
 trainee --help
+trainee version
 trainee webui --host 127.0.0.1 --port 8000
 ```
+
+`trainee version` 会输出当前版本和该版本的最后更新日期。
 
 `trainee webui` 会启动本地服务并打开浏览器页面；只想启动服务、不打开浏览器时使用 `trainee serve`，或运行 `trainee webui --no-open`。
 
@@ -94,13 +97,42 @@ trainee init
 ```text
 Trainee init
 - Project: /home/user/project/toymodel
+- Status: initialized new project files
+
+Files
 - Read: README.md
 - Read: train.py
 - Wrote: .trainee/project.yaml
 - Wrote: .trainee/context.md
 - Wrote: .trainee/program.md
 - Wrote: .trainee/README.md
-- Launcher: python train.py {extra_args}
+- Config: .trainee/project.yaml
+
+Discovery
+- Environment: conda (trainer)
+- Entrypoints: train.py
+- Data candidates: data
+- Config candidates: configs/base.yaml
+- Training limit candidates: --max-iter=1000
+
+Effective configuration
+- Environment: conda (trainer)
+- Working directory: /home/user/project/toymodel
+- Security: guarded
+- Budget: max_rounds=3, timeout=60 minutes
+- Data inputs: data
+- Launch arguments: --config=configs/base.yaml
+- Fixed arguments: --max-iter=1000
+- Tunable parameters: none
+- Metrics: none (built-in loss/total_loss parsing only)
+- Runtime: kill_on_stall=true, wandb=disabled
+- Heartbeat: every 5s, stall after 120s; sources=stdout; log_file_mtime(.trainee/logs/**/*.log, .trainee/runs/**/*.log)
+- Log paths: .trainee/logs/**/*.log, .trainee/runs/**/*.log
+- Launcher: conda run -n trainer python train.py --config configs/base.yaml --max-iter 1000 {extra_args}
+
+Next
+- Review: .trainee/project.yaml, .trainee/context.md, and .trainee/program.md
+- Validate: trainee doctor or trainee run --dry-run
 - Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`
 ```
 
@@ -124,7 +156,7 @@ Trainee init
 trainee init --force
 ```
 
-`init` 会探测 uv、`.venv`、conda 环境、训练入口、数据目录、配置文件及常见 `--max-iter`/`--max-steps` 参数，并把候选项写入 `.trainee/README.md`。默认使用 guarded 模式、stdout heartbeat 和 3 个 round。
+`init` 会分别输出自动探测到的候选信息和最终生效配置，包括环境、训练入口、数据目录、配置文件、固定预算参数、可调参数、指标、heartbeat 与完整 launcher，并把候选项写入 `.trainee/README.md`。默认使用 guarded 模式、stdout heartbeat 和 3 个 round。
 
 ## 项目运行
 

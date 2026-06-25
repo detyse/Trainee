@@ -114,16 +114,42 @@ def test_init_project_adds_program_to_existing_project_without_overwriting_other
 def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     project = tmp_path / "toymodel"
     project.mkdir()
+    (project / "data").mkdir()
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (project / "config.yaml").write_text("epochs: 1\n", encoding="utf-8")
 
     exit_code = main(["init", str(project)])
 
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Trainee init" in output
+    assert "- Status: initialized new project files" in output
     assert "- Read: train.py" in output
     assert "- Wrote: .trainee/project.yaml" in output
     assert "- Wrote: .trainee/program.md" in output
+    assert "Discovery" in output
+    assert "- Environment: system" in output
+    assert "- Entrypoints: train.py" in output
+    assert "- Data candidates: data" in output
+    assert "- Config candidates: config.yaml" in output
+    assert "- Training limit candidates: none" in output
+    assert "Effective configuration" in output
+    assert "- Security: guarded" in output
+    assert "- Budget: max_rounds=3, timeout=60 minutes" in output
+    assert "- Data inputs: data" in output
+    assert "- Launch arguments: --config=config.yaml" in output
+    assert "- Fixed arguments: none" in output
+    assert "- Tunable parameters: none" in output
+    assert "- Metrics: none (built-in loss/total_loss parsing only)" in output
+    assert "- Runtime: kill_on_stall=true, wandb=disabled" in output
+    assert (
+        "- Heartbeat: every 5s, stall after 120s; "
+        "sources=stdout; log_file_mtime(.trainee/logs/**/*.log, .trainee/runs/**/*.log)"
+    ) in output
+    assert "- Log paths: .trainee/logs/**/*.log, .trainee/runs/**/*.log" in output
+    assert "- Launcher: python train.py --config config.yaml {extra_args}" in output
+    assert "- Review: .trainee/project.yaml, .trainee/context.md, and .trainee/program.md" in output
+    assert "- Validate: trainee doctor or trainee run --dry-run" in output
     assert "- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`" in output
     assert "uvicorn" not in output.lower()
 
@@ -182,6 +208,13 @@ def test_webui_command_opens_browser_and_starts_service(monkeypatch):
     assert captured["host"] == "0.0.0.0"
     assert captured["port"] == 8765
     assert captured["reload"] is True
+
+
+def test_version_command_prints_version_and_last_update(capsys):
+    exit_code = main(["version"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == "Trainee 0.1.0\nLast updated: 2026-06-25\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):

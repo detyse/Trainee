@@ -13,6 +13,7 @@ from urllib.parse import quote
 import httpx
 import uvicorn
 
+from trainee import __updated_at__, __version__
 from trainee.context_builder import ContextBuilder
 from trainee.doctor import format_doctor_report, run_doctor
 from trainee.events import EventBus
@@ -223,6 +224,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_web_service(host=host, port=port, reload=reload)
         return 0
 
+    if command == "version":
+        print(f"Trainee {__version__}")
+        print(f"Last updated: {__updated_at__}")
+        return 0
+
     if command == "webui":
         host = getattr(args, "host", "127.0.0.1")
         port = getattr(args, "port", 8000)
@@ -403,6 +409,10 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
     return {
         "project_root": project_root,
         "trainee_dir": trainee_dir,
+        "config_path": config_path,
+        "config": config,
+        "spec": spec,
+        "force": force,
         "files_read": files_read,
         "files_written": written,
         "files_skipped": skipped,
@@ -463,6 +473,9 @@ def _build_parser() -> argparse.ArgumentParser:
     webui_parser.add_argument("--reload", action="store_true", help="Enable uvicorn reload mode.")
     webui_parser.add_argument("--no-open", action="store_true", help="Start the service without opening a browser.")
     webui_parser.set_defaults(command="webui")
+
+    version_parser = subparsers.add_parser("version", help="Print the installed version and last update date.")
+    version_parser.set_defaults(command="version")
 
     init_parser = subparsers.add_parser(
         "init",
@@ -543,10 +556,22 @@ def _print_json(payload: Any) -> None:
 
 def _print_init_result(result: Mapping[str, Any]) -> None:
     project_root = Path(result["project_root"])
+    config = result["config"]
+    spec = result["spec"]
+    discovery = result["discovery"]
     print("Trainee init")
     print(f"- Project: {project_root}")
-    if result["already_initialized"] and not result["files_written"]:
+    if result["force"]:
+        print("- Status: regenerated project files (--force)")
+    elif result["already_initialized"] and not result["files_written"]:
         print("- Status: already initialized; kept existing project files")
+    elif result["files_skipped"]:
+        print("- Status: added missing project files; kept existing files")
+    else:
+        print("- Status: initialized new project files")
+
+    print("")
+    print("Files")
     for path in result["files_read"]:
         print(f"- Read: {Path(path).relative_to(project_root)}")
     if not result["files_read"]:
@@ -555,16 +580,120 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
         print(f"- Wrote: {Path(path).relative_to(project_root)}")
     for path in result["files_skipped"]:
         print(f"- Kept: {Path(path).relative_to(project_root)}")
+    print(f"- Config: {Path(result['config_path']).relative_to(project_root)}")
+
+    print("")
+    print("Discovery")
+    detected_environment = discovery.environment
+    if discovery.env_name:
+        detected_environment += f" ({discovery.env_name})"
+    print(f"- Environment: {detected_environment}")
+    print(f"- Entrypoints: {_joined_or_none(discovery.entrypoints)}")
+    print(f"- Data candidates: {_joined_or_none(discovery.data_dirs)}")
+    print(f"- Config candidates: {_joined_or_none(discovery.config_files)}")
+    print(f"- Training limit candidates: {_format_command_args(discovery.limit_flags)}")
+
+    print("")
+    print("Effective configuration")
+    configured_environment = config.launch.environment
+    if config.launch.env_name:
+        configured_environment += f" ({config.launch.env_name})"
+    timeout = (
+        f"{_format_number(config.run.timeout_minutes)} minutes"
+        if config.run.timeout_minutes is not None
+        else "disabled"
+    )
+    print(f"- Environment: {configured_environment}")
+    print(f"- Working directory: {spec.working_dir}")
+    print(f"- Security: {spec.security_mode}")
+    print(f"- Budget: max_rounds={spec.max_rounds}, timeout={timeout}")
+    print(f"- Data inputs: {_format_data_inputs(config.data)}")
+    print(f"- Launch arguments: {_format_command_args(config.launch.args)}")
+    print(f"- Fixed arguments: {_format_command_args(config.run.fixed_args)}")
+    print(f"- Tunable parameters: {_format_tunable_params(spec.tunable_params)}")
+    metric_summary = _format_metrics(spec.metric_specs)
+    if not spec.metric_specs:
+        metric_summary += " (built-in loss/total_loss parsing only)"
+    print(f"- Metrics: {metric_summary}")
+    print(
+        "- Runtime: "
+        f"kill_on_stall={'true' if spec.kill_on_stall else 'false'}, "
+        f"wandb={'enabled' if spec.wandb_enabled else 'disabled'}"
+    )
+    print(
+        "- Heartbeat: "
+        f"every {_format_number(spec.heartbeat_interval_sec)}s, "
+        f"stall after {_format_number(spec.stall_timeout_sec)}s; "
+        f"sources={_format_signal_sources(spec.signal_sources)}"
+    )
+    print(f"- Log paths: {_joined_or_none(spec.log_paths)}")
     launcher = result["launcher_template"] or "set launch.command in .trainee/project.yaml"
     print(f"- Launcher: {launcher}")
-    discovery = result["discovery"]
-    if discovery.entrypoints:
-        print(f"- Entrypoints: {', '.join(discovery.entrypoints)}")
-    if discovery.data_dirs:
-        print(f"- Data candidates: {', '.join(discovery.data_dirs)}")
+
+    print("")
+    print("Next")
+    print("- Review: .trainee/project.yaml, .trainee/context.md, and .trainee/program.md")
+    print("- Validate: trainee doctor or trainee run --dry-run")
     print("- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`")
     for warning in result["warnings"]:
         print(f"- Warning: {warning}")
+
+
+def _joined_or_none(values: Sequence[Any]) -> str:
+    rendered = [str(value) for value in values]
+    return ", ".join(rendered) if rendered else "none"
+
+
+def _format_command_args(values: Sequence[Any]) -> str:
+    rendered = []
+    for item in values:
+        if item.value is None or item.value is True:
+            rendered.append(item.flag)
+        elif item.value is not False:
+            rendered.append(f"{item.flag}={item.value}")
+    return _joined_or_none(rendered)
+
+
+def _format_data_inputs(values: Sequence[Any]) -> str:
+    rendered = [
+        f"{item.path} via {item.flag}" if item.flag else item.path
+        for item in values
+    ]
+    return _joined_or_none(rendered)
+
+
+def _format_tunable_params(values: Sequence[Any]) -> str:
+    rendered = []
+    for item in values:
+        details = [item.flag, item.type]
+        if item.default is not None:
+            details.append(f"default={item.default}")
+        if item.min_value is not None or item.max_value is not None:
+            details.append(f"range=[{item.min_value}, {item.max_value}]")
+        if item.choices:
+            details.append(f"choices={','.join(item.choices)}")
+        rendered.append(f"{item.name} ({', '.join(details)})")
+    return _joined_or_none(rendered)
+
+
+def _format_metrics(values: Sequence[Any]) -> str:
+    rendered = [
+        f"{item.name} via {item.source} ({item.goal}, required={'true' if item.required else 'false'})"
+        for item in values
+    ]
+    return _joined_or_none(rendered)
+
+
+def _format_signal_sources(values: Sequence[Any]) -> str:
+    rendered = []
+    for item in values:
+        paths = item.configured_paths()
+        rendered.append(f"{item.type}({', '.join(paths)})" if paths else item.type)
+    return "; ".join(rendered) if rendered else "process output"
+
+
+def _format_number(value: float) -> str:
+    return f"{value:g}"
 
 
 def _print_run_result(result: Mapping[str, Any]) -> None:
