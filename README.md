@@ -1,5 +1,7 @@
 # Trainee
 
+<img width="1254" height="1254" alt="ChatGPT Image Jun 25, 2026, 01_44_14 PM" src="https://github.com/user-attachments/assets/7bd146db-897b-4f2b-bf64-967e1f3324d1" />
+
 Trainee is a conservative agent runtime for automating external model-training loops.
 
 It does not contain your training code. Instead, it connects to an existing training project, runs the project’s own training command, watches for progress signals, extracts metrics, asks an LLM or a fallback decision policy for the next parameter set, and repeats until it stops.
