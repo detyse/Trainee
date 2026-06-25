@@ -4,10 +4,13 @@ import asyncio
 import base64
 import html
 import json
+import shlex
 import time
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
+import yaml
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +21,23 @@ from trainee.events import EventBus
 from trainee.logging import configure_logging, get_logger
 from trainee.models import ProjectContext, ProjectSpec, PromptPreset
 from trainee.orchestrator import RuntimeService
+from trainee.project_config import (
+    AdvancedConfig,
+    CommandArg,
+    DataInput,
+    LaunchConfig,
+    MetricsConfig,
+    ProjectConfig,
+    ProjectRegistration,
+    RunConfig,
+    TuningConfig,
+    compile_project_spec,
+    normalized_project_config,
+    project_config_path,
+    project_config_from_spec,
+    restore_project_config,
+    save_project_config,
+)
 from trainee.providers import (
     DEFAULT_ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_MAX_TOKENS,
@@ -28,7 +48,9 @@ from trainee.providers import (
     DEFAULT_MOONSHOT_MODEL,
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_MODEL,
+    AgentDebugSettingsUpdate,
     ProviderSettingsUpdate,
+    SystemPromptUpdate,
     active_model,
     build_provider_config_payload,
     provider_is_configured,
@@ -36,16 +58,35 @@ from trainee.providers import (
     provider_update_from_form,
 )
 from trainee.reporter import ReportGenerator
-from trainee.settings import Settings, load_settings, save_provider_config
+from trainee.settings import Settings, load_settings, save_global_config
 from trainee.storage import ImageAnalysisLimitExceeded, Storage
 
 MAX_LLM_TEST_IMAGE_BYTES = 5 * 1024 * 1024
 logger = get_logger(__name__)
 
 
+def _yaml_dump(value: Any) -> str:
+    def normalize(item: Any) -> Any:
+        if hasattr(item, "model_dump"):
+            return normalize(item.model_dump(mode="json", exclude_none=True))
+        if isinstance(item, dict):
+            return {key: normalize(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [normalize(child) for child in item]
+        return item
+
+    return yaml.safe_dump(
+        normalize(value),
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    ).rstrip()
+
+
 def build_app(settings: Optional[Settings] = None) -> FastAPI:                  # turn fastapi
     app_settings = settings or load_settings()
     templates = Jinja2Templates(directory=str(app_settings.template_dir))       # 
+    templates.env.filters["toyaml"] = _yaml_dump
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -156,11 +197,19 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         )
 
     @app.post("/api/project/register")
-    async def api_register_project(request: Request, spec: ProjectSpec) -> JSONResponse:
+    async def api_register_project(request: Request, payload: Dict[str, Any]) -> JSONResponse:
         runtime = get_runtime(request)
         try:
-            bundle = await runtime.register_project(spec)
-        except ValueError as exc:
+            if "launch" in payload:
+                registration = ProjectRegistration.model_validate(payload)
+                project_root = Path(registration.project_root).expanduser().resolve()
+                config = ProjectConfig.model_validate(registration.model_dump(exclude={"project_root"}))
+            else:
+                legacy_spec = ProjectSpec.model_validate(payload)
+                project_root = Path(legacy_spec.project_root).expanduser().resolve()
+                config = project_config_from_spec(legacy_spec)
+            bundle = await _register_project_config(runtime, project_root, config)
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(bundle.model_dump(mode="json"))
 
@@ -170,10 +219,41 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         bundle = await runtime.update_project_context(context)
         return JSONResponse(bundle.model_dump(mode="json"))
 
+    @app.get("/api/runtime/system-prompt")
+    async def api_get_system_prompt(request: Request) -> JSONResponse:
+        runtime = get_runtime(request)
+        return JSONResponse(
+            {
+                "system_prompt": runtime.settings.system_prompt,
+                "config_path": str(runtime.settings.global_config_path),
+            }
+        )
+
+    @app.post("/api/runtime/system-prompt")
+    async def api_update_system_prompt(request: Request, update: SystemPromptUpdate) -> JSONResponse:
+        runtime = get_runtime(request)
+        try:
+            updated_settings = _update_system_prompt_settings(request, runtime, update.system_prompt)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "system_prompt": updated_settings.system_prompt,
+                "config_path": str(updated_settings.global_config_path),
+            }
+        )
+
     @app.get("/api/project")
     async def api_get_project(request: Request) -> JSONResponse:
         runtime = get_runtime(request)
-        return JSONResponse(runtime.get_bundle().model_dump(mode="json"))
+        payload = runtime.dashboard_payload()
+        bundle = runtime.get_bundle().model_dump(mode="json")
+        bundle["config"] = payload["project_config"].model_dump(mode="json") if payload["project_config"] else None
+        bundle["config_path"] = payload["project_config_path"]
+        return JSONResponse(bundle)
 
     @app.get("/api/health")
     async def api_health(request: Request) -> JSONResponse:
@@ -198,6 +278,26 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             status_code = 409 if runtime.loop_is_running() else 400
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return JSONResponse(provider_settings_payload(updated_settings))
+
+    @app.get("/api/runtime/debug")
+    async def api_get_agent_debug_settings(request: Request) -> JSONResponse:
+        runtime = get_runtime(request)
+        return JSONResponse({"agent_debug_enabled": runtime.settings.agent_debug_enabled})
+
+    @app.post("/api/runtime/debug")
+    async def api_update_agent_debug_settings(
+        request: Request,
+        update: AgentDebugSettingsUpdate,
+    ) -> JSONResponse:
+        runtime = get_runtime(request)
+        try:
+            updated_settings = _update_agent_debug_settings(request, runtime, update.agent_debug_enabled)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return JSONResponse({"agent_debug_enabled": updated_settings.agent_debug_enabled})
 
     @app.get("/api/prompt-preview")
     async def api_get_prompt_preview(request: Request, run_id: Optional[int] = None) -> JSONResponse:
@@ -333,45 +433,13 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         return JSONResponse(result)
 
     @app.post("/ui/project/register")
-    async def ui_register_project(
-        request: Request,
-        project_root: str = Form(...),
-        working_dir: str = Form(...),
-        launcher_template: str = Form(...),
-        security_mode: str = Form("guarded"),
-        data_paths_json: str = Form("[]"),
-        log_paths_json: str = Form("[]"),
-        signal_sources_json: str = Form("[]"),
-        wandb_enabled: Optional[str] = Form(None),
-        heartbeat_interval_sec: float = Form(5.0),
-        stall_timeout_sec: float = Form(120.0),
-        max_rounds: int = Form(3),
-        tunable_params_json: str = Form("[]"),
-        metric_specs_json: str = Form("[]"),
-        metric_prompt: str = Form(""),
-        tuning_prompt: str = Form(""),
-    ) -> HTMLResponse:
+    async def ui_register_project(request: Request) -> HTMLResponse:
         runtime = get_runtime(request)
+        form = await request.form()
         try:
-            spec = _project_spec_from_values(
-                project_root=project_root,
-                working_dir=working_dir,
-                launcher_template=launcher_template,
-                security_mode=security_mode,
-                data_paths_json=data_paths_json,
-                log_paths_json=log_paths_json,
-                signal_sources_json=signal_sources_json,
-                wandb_enabled=wandb_enabled is not None,
-                heartbeat_interval_sec=heartbeat_interval_sec,
-                stall_timeout_sec=stall_timeout_sec,
-                max_rounds=max_rounds,
-                tunable_params_json=tunable_params_json,
-                metric_specs_json=metric_specs_json,
-                metric_prompt=metric_prompt,
-                tuning_prompt=tuning_prompt,
-            )
-            await runtime.register_project(spec)
-        except ValueError as exc:
+            project_root, config = _project_config_from_form(form)
+            await _register_project_config(runtime, project_root, config)
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
@@ -380,8 +448,11 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         runtime = get_runtime(request)
         form = await request.form()
         try:
-            spec = _project_spec_from_form(form)
-            await runtime.register_project(spec)
+            project_root, config = _project_config_from_form(form)
+            bundle = await _register_project_config(runtime, project_root, config)
+            spec = bundle.spec
+            if spec is None:
+                raise ValueError("project registration did not produce a project spec")
             preset_id = _form_str(form, "prompt_preset_id")
             preset_name = _form_str(form, "prompt_preset_name")
             if not preset_name and preset_id:
@@ -394,7 +465,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 project_root=spec.project_root,
                 preset_id=preset_id or None,
             )
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
@@ -409,14 +480,11 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         if preset is None:
             raise HTTPException(status_code=404, detail="prompt preset not found")
         try:
-            spec = _project_spec_from_form(form).model_copy(
-                update={
-                    "metric_prompt": preset.metric_prompt,
-                    "tuning_prompt": preset.tuning_prompt,
-                }
-            )
-            await runtime.register_project(spec)
-        except ValueError as exc:
+            project_root, config = _project_config_from_form(form)
+            config.metrics.prompt = preset.metric_prompt
+            config.advanced.tuning_prompt = preset.tuning_prompt
+            await _register_project_config(runtime, project_root, config)
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
@@ -440,6 +508,21 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             warnings=_parse_json_field(warnings_json, "warnings_json"),
         )
         await runtime.update_project_context(context)
+        return await _render_refresh_response(request, templates, runtime)
+
+    @app.post("/ui/runtime/system-prompt")
+    async def ui_update_system_prompt(
+        request: Request,
+        system_prompt: str = Form(""),
+    ) -> HTMLResponse:
+        runtime = get_runtime(request)
+        try:
+            _update_system_prompt_settings(request, runtime, system_prompt)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
     @app.post("/ui/runtime/provider")
@@ -488,6 +571,19 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
+    @app.post("/ui/runtime/debug")
+    async def ui_update_agent_debug_settings(
+        request: Request,
+        agent_debug_enabled: Optional[str] = Form(None),
+    ) -> HTMLResponse:
+        runtime = get_runtime(request)
+        try:
+            _update_agent_debug_settings(request, runtime, agent_debug_enabled is not None)
+        except (OSError, ValueError) as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return await _render_refresh_response(request, templates, runtime)
+
     @app.post("/ui/loop/start")
     async def ui_start_loop(request: Request) -> HTMLResponse:
         runtime = get_runtime(request)
@@ -518,7 +614,53 @@ def _update_provider_settings(
     if runtime.loop_is_running():
         raise ValueError("stop the loop before changing provider settings")
     provider_payload = build_provider_config_payload(update)
-    save_provider_config(runtime.settings.global_config_path, provider_payload)
+    save_global_config(runtime.settings.global_config_path, provider_payload)
+    updated_settings = load_settings(
+        repo_root=runtime.settings.repo_root,
+        data_dir=runtime.settings.data_dir,
+        project_root=runtime.settings.project_root,
+        global_config_path=runtime.settings.global_config_path,
+    )
+    request.app.state.settings = updated_settings
+    runtime.update_settings(updated_settings)
+    return updated_settings
+
+
+def _update_agent_debug_settings(
+    request: Request,
+    runtime: RuntimeService,
+    enabled: bool,
+) -> Settings:
+    if runtime.loop_is_running():
+        raise ValueError("stop the loop before changing Agent Debug settings")
+    save_global_config(
+        runtime.settings.global_config_path,
+        {"agent_debug_enabled": enabled},
+    )
+    updated_settings = load_settings(
+        repo_root=runtime.settings.repo_root,
+        data_dir=runtime.settings.data_dir,
+        project_root=runtime.settings.project_root,
+        global_config_path=runtime.settings.global_config_path,
+    )
+    request.app.state.settings = updated_settings
+    runtime.update_settings(updated_settings)
+    return updated_settings
+
+
+def _update_system_prompt_settings(
+    request: Request,
+    runtime: RuntimeService,
+    system_prompt: str,
+) -> Settings:
+    if runtime.loop_is_running():
+        raise ValueError("stop the loop before changing the system prompt")
+    if not system_prompt.strip():
+        raise ValueError("system_prompt cannot be blank")
+    save_global_config(
+        runtime.settings.global_config_path,
+        {"system_prompt": system_prompt},
+    )
     updated_settings = load_settings(
         repo_root=runtime.settings.repo_root,
         data_dir=runtime.settings.data_dir,
@@ -548,68 +690,140 @@ def _health_payload(request: Request) -> Dict[str, Any]:
     }
 
 
-def _parse_json_field(raw: str, field_name: str) -> Any:
+async def _register_project_config(
+    runtime: RuntimeService,
+    project_root: Path,
+    config: ProjectConfig,
+):
+    normalized = normalized_project_config(project_root, config)
+    spec = compile_project_spec(project_root, normalized)
+    context = runtime.prepare_project_registration(spec)
+    path = project_config_path(project_root)
+    previous = path.read_bytes() if path.is_file() else None
     try:
-        return json.loads(raw or "[]")
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{field_name} must be valid JSON") from exc
+        save_project_config(project_root, normalized)
+        return await runtime.register_project(spec, context=context)
+    except Exception:
+        restore_project_config(project_root, previous)
+        raise
 
 
-def _project_spec_from_values(
-    *,
-    project_root: str,
-    working_dir: str,
-    launcher_template: str,
-    security_mode: str,
-    data_paths_json: str,
-    log_paths_json: str,
-    signal_sources_json: str,
-    wandb_enabled: bool,
-    heartbeat_interval_sec: float,
-    stall_timeout_sec: float,
-    max_rounds: int,
-    tunable_params_json: str,
-    metric_specs_json: str,
-    metric_prompt: str,
-    tuning_prompt: str,
-) -> ProjectSpec:
-    return ProjectSpec(
-        project_root=project_root,
-        working_dir=working_dir,
-        launcher_template=launcher_template,
-        security_mode=security_mode,
-        data_paths=_parse_json_field(data_paths_json, "data_paths_json"),
-        log_paths=_parse_json_field(log_paths_json, "log_paths_json"),
-        signal_sources=_parse_json_field(signal_sources_json, "signal_sources_json"),
-        wandb_enabled=wandb_enabled,
-        heartbeat_interval_sec=heartbeat_interval_sec,
-        stall_timeout_sec=stall_timeout_sec,
-        max_rounds=max_rounds,
-        tunable_params=_parse_json_field(tunable_params_json, "tunable_params_json"),
-        metric_specs=_parse_json_field(metric_specs_json, "metric_specs_json"),
-        metric_prompt=metric_prompt,
-        tuning_prompt=tuning_prompt,
+def _project_config_from_form(form: FormData) -> tuple[Path, ProjectConfig]:
+    project_root = Path(_form_str(form, "project_root")).expanduser().resolve()
+    legacy_launcher = _form_str(form, "launcher_template")
+    if legacy_launcher:
+        def legacy_json(name: str) -> Any:
+            try:
+                return json.loads(_form_str(form, name, "[]") or "[]")
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{name} must be valid JSON") from exc
+
+        spec = ProjectSpec(
+            project_root=str(project_root),
+            working_dir=_form_str(form, "working_dir", str(project_root)),
+            launcher_template=legacy_launcher,
+            security_mode=_form_str(form, "security_mode", "guarded"),
+            data_paths=legacy_json("data_paths_json"),
+            log_paths=legacy_json("log_paths_json"),
+            signal_sources=legacy_json("signal_sources_json"),
+            wandb_enabled=_form_checkbox(form, "wandb_enabled"),
+            heartbeat_interval_sec=_form_float(form, "heartbeat_interval_sec", 5.0),
+            stall_timeout_sec=_form_float(form, "stall_timeout_sec", 120.0),
+            max_rounds=_form_int(form, "max_rounds", 3),
+            tunable_params=legacy_json("tunable_params_json"),
+            metric_specs=legacy_json("metric_specs_json"),
+            metric_prompt=_form_str(form, "metric_prompt"),
+            tuning_prompt=_form_str(form, "tuning_prompt"),
+        )
+        return project_root, project_config_from_spec(spec)
+
+    command = shlex.split(_form_str(form, "launch_command"))
+    data = []
+    for line in _nonempty_lines(_form_str(form, "data_lines")):
+        path, separator, flag = line.partition("|")
+        data.append(DataInput(path=path.strip(), flag=flag.strip() if separator and flag.strip() else None))
+
+    advanced_payload = _parse_yaml_mapping(_form_str(form, "advanced_yaml"), "advanced_yaml")
+    advanced_payload.update(
+        {
+            "security_mode": _form_str(form, "security_mode", "guarded"),
+            "working_dir": _form_str(form, "working_dir", ".") or ".",
+            "wandb_enabled": _form_checkbox(form, "wandb_enabled"),
+            "tuning_prompt": _form_str(form, "tuning_prompt"),
+        }
     )
-
-
-def _project_spec_from_form(form: FormData) -> ProjectSpec:
-    return _project_spec_from_values(
-        project_root=_form_str(form, "project_root"),
-        working_dir=_form_str(form, "working_dir"),
-        launcher_template=_form_str(form, "launcher_template"),
-        security_mode=_form_str(form, "security_mode", "guarded"),
-        data_paths_json=_form_str(form, "data_paths_json", "[]"),
-        log_paths_json=_form_str(form, "log_paths_json", "[]"),
-        signal_sources_json=_form_str(form, "signal_sources_json", "[]"),
-        wandb_enabled=_form_checkbox(form, "wandb_enabled"),
-        heartbeat_interval_sec=_form_float(form, "heartbeat_interval_sec", 5.0),
-        stall_timeout_sec=_form_float(form, "stall_timeout_sec", 120.0),
-        max_rounds=_form_int(form, "max_rounds", 3),
-        tunable_params_json=_form_str(form, "tunable_params_json", "[]"),
-        metric_specs_json=_form_str(form, "metric_specs_json", "[]"),
-        metric_prompt=_form_str(form, "metric_prompt"),
-        tuning_prompt=_form_str(form, "tuning_prompt"),
+    timeout_raw = _form_str(form, "timeout_minutes", "60").strip()
+    config = ProjectConfig(
+        data=data,
+        launch=LaunchConfig(
+            environment=_form_str(form, "launch_environment", "system"),
+            env_name=_form_str(form, "launch_env_name") or None,
+            command=command,
+            baseline_config=_form_str(form, "baseline_config") or None,
+            args=_parse_arg_lines(_form_str(form, "launch_args_lines")),
+        ),
+        run=RunConfig(
+            max_rounds=_form_int(form, "max_rounds", 3),
+            timeout_minutes=float(timeout_raw) if timeout_raw else None,
+            fixed_args=_parse_arg_lines(_form_str(form, "fixed_args_lines")),
+        ),
+        tuning=TuningConfig(params=_parse_yaml_list(_form_str(form, "tunable_params_yaml"), "tunable_params_yaml")),
+        metrics=MetricsConfig(
+            specs=_parse_yaml_list(_form_str(form, "metric_specs_yaml"), "metric_specs_yaml"),
+            prompt=_form_str(form, "metric_prompt"),
+        ),
+        advanced=AdvancedConfig.model_validate(advanced_payload),
     )
+    return project_root, config
+
+
+def _parse_arg_lines(raw: str) -> list[CommandArg]:
+    args: list[CommandArg] = []
+    for line in _nonempty_lines(raw):
+        flag, separator, value = line.partition("=")
+        args.append(CommandArg(flag=flag.strip(), value=_coerce_scalar(value.strip()) if separator else None))
+    return args
+
+
+def _parse_yaml_list(raw: str, field_name: str) -> list[Any]:
+    if not raw.strip():
+        return []
+    try:
+        payload = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{field_name} must be valid YAML") from exc
+    if payload is None:
+        return []
+    if not isinstance(payload, list):
+        raise ValueError(f"{field_name} must be a YAML list")
+    return payload
+
+
+def _parse_yaml_mapping(raw: str, field_name: str) -> dict[str, Any]:
+    if not raw.strip():
+        return {}
+    try:
+        payload = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{field_name} must be valid YAML") from exc
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"{field_name} must be a YAML mapping")
+    return payload
+
+
+def _nonempty_lines(raw: str) -> list[str]:
+    return [line.strip() for line in raw.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
+def _coerce_scalar(raw: str) -> Any:
+    if not raw:
+        return ""
+    try:
+        return yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return raw
 
 
 def _form_str(form: FormData, key: str, default: str = "") -> str:

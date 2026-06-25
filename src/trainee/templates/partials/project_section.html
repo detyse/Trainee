@@ -1,12 +1,11 @@
 <section id="project-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  {% set cfg = project_config %}
   <div class="panel-header">
     <div>
-      <p class="panel-kicker">Project Spec</p>
-      <h2>External Training Project</h2>
+      <p class="panel-kicker">Project YAML</p>
+      <h2>Training Setup</h2>
     </div>
-    {% if spec or runtime_settings.launch_project_root %}
-      <span class="muted">{{ spec.project_root if spec else runtime_settings.launch_project_root }}</span>
-    {% endif %}
+    <span class="muted">{{ project_config_path or "Run trainee init first" }}</span>
   </div>
 
   <form
@@ -21,92 +20,143 @@
       <span>Project root</span>
       <input type="text" name="project_root" value="{{ spec.project_root if spec else runtime_settings.launch_project_root }}" placeholder="/path/to/project" />
     </label>
-    <label>
-      <span>Working dir</span>
-      <input type="text" name="working_dir" value="{{ spec.working_dir if spec else runtime_settings.launch_project_root }}" placeholder="/path/to/project" />
-    </label>
-    <label>
-      <span>Launcher template</span>
-      <textarea name="launcher_template" rows="3" placeholder="conda run -n trainer python {project_root}/train.py {extra_args}">{{ spec.launcher_template if spec else runtime_settings.launch_launcher_template }}</textarea>
-    </label>
 
-    <label>
-      <span>Security mode</span>
-      <select name="security_mode">
-        <option value="guarded" {% if not spec or spec.security_mode == "guarded" %}selected{% endif %}>Guarded</option>
-        <option value="unsafe" {% if spec and spec.security_mode == "unsafe" %}selected{% endif %}>Unsafe</option>
-      </select>
-    </label>
-
-    <div class="two-col">
+    <div class="settings-box">
+      <div class="panel-header compact">
+        <div>
+          <p class="panel-kicker">1. Data</p>
+          <h3>Training inputs</h3>
+        </div>
+      </div>
       <label>
-        <span>Data paths JSON</span>
-        <textarea name="data_paths_json" rows="4">{{ spec.data_paths | tojson(indent=2) if spec else '[]' }}</textarea>
-      </label>
-      <label>
-        <span>Log paths JSON</span>
-        <textarea name="log_paths_json" rows="4">{{ spec.log_paths | tojson(indent=2) if spec else '[]' }}</textarea>
-      </label>
-      <label>
-        <span>Signal sources JSON</span>
-        <textarea name="signal_sources_json" rows="4">{{ signal_sources_json }}</textarea>
+        <span>One path per line; optionally add <code>| --flag</code></span>
+        <textarea name="data_lines" rows="4" placeholder="data/train | --data-root">{% if cfg %}{% for item in cfg.data %}{{ item.path }}{% if item.flag %} | {{ item.flag }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
       </label>
     </div>
 
-    <div class="three-col">
+    <div class="settings-box">
+      <div class="panel-header compact">
+        <div>
+          <p class="panel-kicker">2. Launch</p>
+          <h3>Environment and command</h3>
+        </div>
+      </div>
+      <div class="three-col">
+        <label>
+          <span>Environment</span>
+          <select name="launch_environment">
+            {% for name in ["system", "uv", "venv", "conda"] %}
+              <option value="{{ name }}" {% if cfg and cfg.launch.environment == name %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Conda env name</span>
+          <input type="text" name="launch_env_name" value="{{ cfg.launch.env_name or '' if cfg else '' }}" placeholder="trainer" />
+        </label>
+        <label>
+          <span>Command</span>
+          <input type="text" name="launch_command" value="{{ cfg.launch.command | join(' ') if cfg else 'python train.py' }}" placeholder="python train.py" />
+        </label>
+      </div>
       <label>
-        <span>Heartbeat sec</span>
-        <input type="number" step="0.1" name="heartbeat_interval_sec" value="{{ spec.heartbeat_interval_sec if spec else 5 }}" />
+        <span>Baseline config (project-relative, optional)</span>
+        <input
+          type="text"
+          name="baseline_config"
+          value="{{ cfg.launch.baseline_config or '' if cfg else '' }}"
+          placeholder="configs/base.yaml"
+        />
       </label>
       <label>
-        <span>Stall timeout sec</span>
-        <input type="number" step="0.1" name="stall_timeout_sec" value="{{ spec.stall_timeout_sec if spec else 120 }}" />
-      </label>
-      <label>
-        <span>Max rounds</span>
-        <input type="number" step="1" name="max_rounds" value="{{ spec.max_rounds if spec else 3 }}" />
+        <span>Launch arguments, one per line as <code>--flag=value</code></span>
+        <textarea name="launch_args_lines" rows="4" placeholder="--config=configs/base.yaml">{% if cfg %}{% for item in cfg.launch.args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
       </label>
     </div>
 
-    <label class="checkbox-row">
-      <input type="checkbox" name="wandb_enabled" {% if spec and spec.wandb_enabled %}checked{% endif %} />
-      <span>W&amp;B enabled</span>
-    </label>
+    <div class="settings-box">
+      <div class="panel-header compact">
+        <div>
+          <p class="panel-kicker">3. Budget</p>
+          <h3>Fixed run limits</h3>
+        </div>
+      </div>
+      <div class="three-col">
+        <label>
+          <span>Max rounds</span>
+          <input type="number" min="1" step="1" name="max_rounds" value="{{ cfg.run.max_rounds if cfg else 3 }}" />
+        </label>
+        <label>
+          <span>Timeout per round (minutes)</span>
+          <input type="number" min="0.1" step="0.1" name="timeout_minutes" value="{{ cfg.run.timeout_minutes if cfg and cfg.run.timeout_minutes is not none else '' }}" />
+        </label>
+        <label>
+          <span>Fixed arguments</span>
+          <textarea name="fixed_args_lines" rows="4" placeholder="--max-iter=1000">{% if cfg %}{% for item in cfg.run.fixed_args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
+        </label>
+      </div>
+      <p class="muted">Fixed arguments are identical in every round and cannot be changed by the agent.</p>
+    </div>
 
     <div class="two-col">
       <label>
-        <span>Tunable params JSON</span>
-        <textarea name="tunable_params_json" rows="10">{{ tunable_params_json }}</textarea>
+        <span>Tunable parameters (YAML list)</span>
+        <textarea name="tunable_params_yaml" rows="10" placeholder="- name: lr&#10;  flag: --lr&#10;  type: float&#10;  default: 0.001&#10;  min_value: 0.00001&#10;  max_value: 0.1">{{ cfg.tuning.params | toyaml if cfg else '[]' }}</textarea>
       </label>
       <label>
-        <span>Metric specs JSON</span>
-        <textarea name="metric_specs_json" rows="10">{{ metric_specs_json }}</textarea>
+        <span>Metrics (YAML list)</span>
+        <textarea name="metric_specs_yaml" rows="10" placeholder="- name: total_loss&#10;  source: stdout_regex&#10;  key_or_pattern: 'total_loss=(?P&lt;value&gt;[0-9.]+)'&#10;  goal: min">{{ cfg.metrics.specs | toyaml if cfg else '[]' }}</textarea>
       </label>
     </div>
 
     <div class="two-col">
       <label>
         <span>Metric prompt</span>
-        <textarea id="metric-prompt-input" name="metric_prompt" rows="4" placeholder="Tell the agent which metrics matter most.">{{ spec.metric_prompt if spec else '' }}</textarea>
+        <textarea id="metric-prompt-input" name="metric_prompt" rows="4">{{ cfg.metrics.prompt if cfg else '' }}</textarea>
       </label>
       <label>
         <span>Tuning prompt</span>
-        <textarea id="tuning-prompt-input" name="tuning_prompt" rows="4" placeholder="Tell the agent how to explore parameters.">{{ spec.tuning_prompt if spec else '' }}</textarea>
+        <textarea id="tuning-prompt-input" name="tuning_prompt" rows="4">{{ cfg.advanced.tuning_prompt if cfg else '' }}</textarea>
       </label>
     </div>
 
-    <div class="preset-box">
-      <div class="panel-header compact">
-        <div>
-          <p class="panel-kicker">Prompt Presets</p>
-          <h3>Saved Prompt Templates</h3>
-        </div>
-        <span class="muted">{{ prompt_presets|length }} saved</span>
+    <details class="settings-box">
+      <summary>Advanced runtime settings</summary>
+      <div class="three-col detail-spacing">
+        <label>
+          <span>Working dir</span>
+          <input type="text" name="working_dir" value="{{ cfg.advanced.working_dir or '.' if cfg else '.' }}" />
+        </label>
+        <label>
+          <span>Security mode</span>
+          <select name="security_mode">
+            <option value="guarded" {% if not cfg or cfg.advanced.security_mode == "guarded" %}selected{% endif %}>guarded</option>
+            <option value="unsafe" {% if cfg and cfg.advanced.security_mode == "unsafe" %}selected{% endif %}>unsafe</option>
+          </select>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" name="wandb_enabled" {% if cfg and cfg.advanced.wandb_enabled %}checked{% endif %} />
+          <span>W&amp;B enabled</span>
+        </label>
       </div>
+      <label>
+        <span>Additional advanced YAML</span>
+        <textarea name="advanced_yaml" rows="8" placeholder="heartbeat_interval_sec: 5&#10;stall_timeout_sec: 120&#10;shell_command: null">{% if cfg %}{{ {
+          "heartbeat_interval_sec": cfg.advanced.heartbeat_interval_sec,
+          "stall_timeout_sec": cfg.advanced.stall_timeout_sec,
+          "kill_on_stall": cfg.advanced.kill_on_stall,
+          "signal_sources": cfg.advanced.signal_sources,
+          "log_paths": cfg.advanced.log_paths,
+          "shell_command": cfg.advanced.shell_command
+        } | toyaml }}{% endif %}</textarea>
+      </label>
+    </details>
+
+    <div class="preset-box">
       <div class="preset-grid">
         <label>
-          <span>Preset</span>
-          <select id="prompt-preset-select" name="prompt_preset_id" onchange="window.applyPromptPreset && window.applyPromptPreset(this)">
+          <span>Prompt preset</span>
+          <select id="prompt-preset-select" name="prompt_preset_id">
             <option value="">Select a prompt preset</option>
             {% for preset in prompt_presets %}
               <option value="{{ preset.id }}">{{ preset.name }}</option>
@@ -115,36 +165,17 @@
         </label>
         <label>
           <span>Preset name</span>
-          <input id="prompt-preset-name-input" type="text" name="prompt_preset_name" placeholder="e.g. fast debug, final sweep" />
+          <input type="text" name="prompt_preset_name" placeholder="e.g. fast debug" />
         </label>
       </div>
       <div class="actions">
-        <button
-          class="secondary"
-          type="submit"
-          formaction="/ui/prompt-presets/apply"
-          hx-post="/ui/prompt-presets/apply"
-          hx-target="#project-section"
-          hx-swap="outerHTML"
-        >
-          Apply Preset
-        </button>
-        <button
-          class="secondary"
-          type="submit"
-          formaction="/ui/prompt-presets/save"
-          hx-post="/ui/prompt-presets/save"
-          hx-target="#project-section"
-          hx-swap="outerHTML"
-        >
-          Save Prompt Preset
-        </button>
+        <button class="secondary" type="submit" formaction="/ui/prompt-presets/apply" hx-post="/ui/prompt-presets/apply" hx-target="#project-section" hx-swap="outerHTML">Apply Preset</button>
+        <button class="secondary" type="submit" formaction="/ui/prompt-presets/save" hx-post="/ui/prompt-presets/save" hx-target="#project-section" hx-swap="outerHTML">Save Prompt Preset</button>
       </div>
-      <script type="application/json" id="prompt-presets-data">{{ prompt_presets_payload | tojson }}</script>
     </div>
 
     <div class="actions">
-      <button class="primary" type="submit">Save Project</button>
+      <button class="primary" type="submit">Save project.yaml</button>
     </div>
   </form>
 </section>

@@ -35,6 +35,15 @@
         <pre>{{ selected_decision_json }}</pre>
       </div>
     {% endif %}
+    {% if selected_run.agent_trace %}
+      <details class="detail-block debug-block">
+        <summary>
+          <span class="label">Agent Debug</span>
+          <span class="status-pill status-{{ selected_run.agent_trace.status|replace('_', '-') }}">{{ selected_run.agent_trace.status }}</span>
+        </summary>
+        <pre class="agent-trace-output">{{ selected_agent_trace_json }}</pre>
+      </details>
+    {% endif %}
     {% if selected_run.error %}
       <div class="detail-block danger">
         <span class="label">Error</span>

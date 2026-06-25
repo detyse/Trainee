@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
@@ -90,6 +91,16 @@ class MetricSpec(BaseModel):
     def validate_source_paths(self) -> "MetricSpec":
         if self.source in {"log_file_regex", "jsonl"} and not self.path and not self.paths:
             raise ValueError(f"{self.source} requires path or paths")
+        if self.source in {"log_regex", "stdout_regex", "log_file_regex"}:
+            try:
+                pattern = re.compile(self.key_or_pattern)
+            except re.error as exc:
+                raise ValueError(f"{self.source} key_or_pattern is invalid regex: {exc}") from exc
+            if "value" not in pattern.groupindex and pattern.groups < 1:
+                raise ValueError(
+                    f"{self.source} key_or_pattern must contain a capture group "
+                    "or a named (?P<value>...) group"
+                )
         return self
 
 
@@ -223,6 +234,8 @@ class PromptPreview(BaseModel):
     system_prompt: str = ""
     user_prompt: str = ""
     payload: Dict[str, Any] = Field(default_factory=dict)
+    static_context_json: Dict[str, Any] = Field(default_factory=dict)
+    dynamic_state_json: Dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -249,6 +262,33 @@ class AgentDecision(BaseModel):
     next_params: Dict[str, Any] = Field(default_factory=dict)
     reason: str
     focus_metrics: List[str] = Field(default_factory=list)
+    hypothesis: str = ""
+    change_summary: str = ""
+    latest_round_judgement: str = "inconclusive"
+    compare_to_baseline: str = ""
+    compare_to_best: str = ""
+    expected_effect: str = ""
+    avoid_repeating: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class AgentTrace(BaseModel):
+    provider: str
+    model: Optional[str] = None
+    status: str
+    http_status: Optional[int] = None
+    request_id: Optional[str] = None
+    raw_response_body: Optional[str] = None
+    error_body: Optional[str] = None
+    raw_output: Optional[str] = None
+    extracted_json: Optional[Dict[str, Any]] = None
+    parse_error: Optional[str] = None
+    validation_error: Optional[str] = None
+    provider_error: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+    finish_reason: Optional[str] = None
+    fallback_reason: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now)
 
 
 class RunSession(BaseModel):
@@ -279,6 +319,7 @@ class RoundRecord(BaseModel):
     wandb_run_url: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
     agent_decision: Optional[AgentDecision] = None
+    agent_trace: Optional[AgentTrace] = None
     prompt_preview: Optional[PromptPreview] = None
     error: Optional[str] = None
 

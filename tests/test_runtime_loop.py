@@ -32,6 +32,43 @@ REGISTER_PAYLOAD_TEMPLATE = {
 }
 
 
+def _registration(payload):
+    shell_command = str(payload["launcher_template"]).replace("{extra_args}", "").strip()
+    timeout = payload.get("round_timeout_sec")
+    return {
+        "project_root": payload["project_root"],
+        "version": 1,
+        "data": [{"path": path} for path in payload.get("data_paths", [])],
+        "launch": {
+            "environment": "system",
+            "command": ["python", "train.py"],
+            "args": [],
+        },
+        "run": {
+            "max_rounds": payload.get("max_rounds", 3),
+            "timeout_minutes": timeout / 60 if timeout is not None else None,
+            "fixed_args": [],
+        },
+        "tuning": {"params": payload.get("tunable_params", [])},
+        "metrics": {
+            "specs": payload.get("metric_specs", []),
+            "prompt": payload.get("metric_prompt", ""),
+        },
+        "advanced": {
+            "security_mode": payload.get("security_mode", "guarded"),
+            "working_dir": payload.get("working_dir"),
+            "heartbeat_interval_sec": payload.get("heartbeat_interval_sec", 5.0),
+            "stall_timeout_sec": payload.get("stall_timeout_sec", 120.0),
+            "kill_on_stall": payload.get("kill_on_stall", True),
+            "signal_sources": payload.get("signal_sources", []),
+            "log_paths": payload.get("log_paths", []),
+            "wandb_enabled": payload.get("wandb_enabled", False),
+            "tuning_prompt": payload.get("tuning_prompt", ""),
+            "shell_command": shell_command,
+        },
+    }
+
+
 def test_rendered_command_shell_quotes_values(runtime_env):
     external_project = runtime_env["external_project"]
     spec = REGISTER_PAYLOAD_TEMPLATE | {
@@ -102,7 +139,7 @@ def test_loop_runs_two_rounds_and_collects_metrics(runtime_env, wait_for):
         "log_paths": [str(external_project / "logs" / "*.log")],
     }
 
-    response = client.post("/api/project/register", json=register_payload)
+    response = client.post("/api/project/register", json=_registration(register_payload))
     assert response.status_code == 200
     assert response.json()["context"]["project_summary"]
 
@@ -115,7 +152,7 @@ def test_loop_runs_two_rounds_and_collects_metrics(runtime_env, wait_for):
     session_id = runs_payload["sessions"][0]["id"]
     assert len(rounds) == 2
     assert rounds[0]["metrics"]["total_loss"] > 0
-    assert rounds[1]["agent_decision"]["action"] in {"continue", "stop"}
+    assert all(item["agent_decision"]["action"] in {"continue", "stop"} for item in rounds)
     assert any("wandb.ai" in (item.get("wandb_run_url") or "") for item in rounds)
 
     detail_html = client.get(f"/fragments/run-detail?run_id={rounds[0]['id']}")
@@ -175,7 +212,7 @@ log_path.write_text(line, encoding="utf-8")
         "max_rounds": 1,
     }
 
-    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
     assert client.post("/api/loop/start").status_code == 200
 
     wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
@@ -239,7 +276,7 @@ for step, loss in enumerate([0.9, 0.4]):
         "max_rounds": 1,
     }
 
-    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
     assert client.post("/api/loop/start").status_code == 200
 
     wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
@@ -266,7 +303,7 @@ def test_guarded_loop_writes_logs_under_trainee(runtime_env, wait_for):
         "max_rounds": 1,
     }
 
-    response = client.post("/api/project/register", json=register_payload)
+    response = client.post("/api/project/register", json=_registration(register_payload))
     assert response.status_code == 200, response.text
     assert client.post("/api/loop/start").status_code == 200
 
@@ -306,7 +343,7 @@ def test_stalled_round_marks_failed_session(runtime_env, wait_for):
         "max_rounds": 1,
     }
 
-    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
     assert client.post("/api/loop/start").status_code == 200
 
     wait_for(lambda: client.get("/api/loop").json()["status"] == "failed")
@@ -331,7 +368,7 @@ def test_round_timeout_terminates_process_and_marks_failed_session(runtime_env, 
         "max_rounds": 1,
     }
 
-    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
     assert client.post("/api/loop/start").status_code == 200
 
     wait_for(lambda: client.get("/api/loop").json()["status"] == "failed")
@@ -356,7 +393,7 @@ def test_force_stop_terminates_active_round_and_marks_session_stopped(runtime_en
         "max_rounds": 1,
     }
 
-    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
     assert client.post("/api/loop/start").status_code == 200
     wait_for(lambda: client.get("/api/loop").json()["status"] == "running_round")
 
@@ -389,14 +426,14 @@ def test_resume_uses_source_session_snapshot_not_current_project_spec(runtime_en
         ],
     }
 
-    assert client.post("/api/project/register", json=original_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(original_payload)).status_code == 200
     assert client.post("/api/loop/start").status_code == 200
     wait_for(lambda: client.get("/api/loop").json()["status"] == "running_round")
     assert client.post("/api/loop/stop").status_code == 200
     wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
     source_session_id = client.get("/api/runs").json()["sessions"][0]["id"]
 
-    assert client.post("/api/project/register", json=changed_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(changed_payload)).status_code == 200
     resume = client.post("/api/loop/start", json={"resume_session_id": source_session_id})
     assert resume.status_code == 200
     wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")

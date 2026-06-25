@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from trainee.decision import DecisionEngine
+from trainee.decision import DecisionEngine, ProviderCompletion
 from trainee.executor import TrainingExecutor
 from trainee.models import AgentDecision, MetricSpec, ProjectContext, ProjectSpec, RoundRecord, TunableParam
+from trainee.research_state import ResearchStateBuilder
 from trainee.security import build_secure_command
 from trainee.settings import Settings
 
@@ -35,6 +36,11 @@ def test_project_merge_rejects_unknown_params() -> None:
 
     with pytest.raises(ValueError, match="unknown tunable params"):
         spec.merge_param_values({"unknown": 1})
+
+
+def test_metric_regex_requires_capture_group() -> None:
+    with pytest.raises(ValueError, match="capture group"):
+        MetricSpec(name="total_loss", source="log_regex", key_or_pattern="total_loss")
 
 
 def test_executor_rejects_paths_outside_project_root(tmp_path: Path) -> None:
@@ -190,14 +196,73 @@ def test_invalid_provider_params_fall_back_without_unknown_values(tmp_path: Path
     ]
 
     async def invalid_provider(*args, **kwargs):
-        return AgentDecision(action="continue", next_params={"unknown": "bad"}, reason="bad"), None
+        content = '{"action":"continue","next_params":{"unknown":"bad"},"reason":"bad"}'
+        return ProviderCompletion(content=content, raw_response_body=content, http_status=200)
 
-    engine._provider_decision = invalid_provider  # type: ignore[method-assign]
+    engine._provider_is_configured = lambda: True  # type: ignore[method-assign]
+    engine._provider_complete = invalid_provider  # type: ignore[method-assign]
 
-    result = asyncio.run(engine.decide_with_prompt(spec, context, history, {"lr": 0.2}))
+    result = asyncio.run(
+        engine.decide_with_prompt(
+            spec=spec,
+            context=context,
+            research_state=ResearchStateBuilder().build(spec, history),
+            current_params={"lr": 0.2},
+            prompt_documents=[],
+        )
+    )
 
     assert "unknown" not in result.decision.next_params
     assert set(result.decision.next_params) <= {"lr"}
+
+
+def test_heuristic_fallback_stops_when_no_safe_numeric_adjustment(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    engine = DecisionEngine(settings)
+    project = tmp_path / "project"
+    spec = ProjectSpec(
+        project_root=str(project),
+        working_dir=str(project),
+        launcher_template="python train.py {extra_args}",
+        tunable_params=[
+            TunableParam(name="lr", flag="--lr", type="float", default=0.05, min_value=0.05, max_value=0.05),
+        ],
+        metric_specs=[
+            MetricSpec(
+                name="total_loss",
+                source="log_regex",
+                key_or_pattern=r"total_loss=(?P<value>-?\d+(?:\.\d+)?)",
+                goal="min",
+                required=True,
+            )
+        ],
+    )
+    context = ProjectContext(project_summary="Fake project")
+    history = [
+        RoundRecord(
+            session_id=1,
+            round_index=1,
+            resolved_command="python train.py --lr 0.05",
+            param_values={"lr": 0.05},
+            status="completed",
+            metrics={"total_loss": 1.0},
+            exit_code=0,
+        )
+    ]
+
+    result = asyncio.run(
+        engine.decide_with_prompt(
+            spec=spec,
+            context=context,
+            research_state=ResearchStateBuilder().build(spec, history),
+            current_params={"lr": 0.05},
+            prompt_documents=[],
+        )
+    )
+
+    assert result.decision.action == "stop"
+    assert "could not find a safe numeric tunable parameter" in result.decision.reason
+    assert result.decision.next_params == {"lr": 0.05}
 
 
 def _spec(project_root: Path) -> ProjectSpec:

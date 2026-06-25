@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 import re
 
 import pytest
+import yaml
 
 import trainee.cli as cli
 from trainee.cli import build_tool_manifest, call_tool, init_project, load_tool_input, main
@@ -17,6 +17,11 @@ def test_tool_manifest_exposes_tool_call_safe_names():
     assert "project_register" in names
     assert "loop_start" in names
     assert "runs_get" in names
+    assert "runtime_debug_update" in names
+    assert "runtime_system_prompt_get" in names
+    assert "runtime_system_prompt_update" in names
+    assert "project_get_program" not in names
+    assert "project_update_program" not in names
     assert all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names)
 
     register_tool = next(item for item in tools if item["function"]["name"] == "project_register")
@@ -54,15 +59,16 @@ def test_init_project_initializes_project_files(tmp_path):
     result = init_project(project)
 
     trainee_dir = project / ".trainee"
-    project_json = json.loads((trainee_dir / "project.json").read_text(encoding="utf-8"))
+    project_yaml = yaml.safe_load((trainee_dir / "project.yaml").read_text(encoding="utf-8"))
     context_md = (trainee_dir / "context.md").read_text(encoding="utf-8")
-    assert project_json["project_root"] == str(project)
-    assert project_json["working_dir"] == str(project)
-    assert project_json["launcher_template"] == "python {project_root}/train.py {extra_args}"
-    assert project_json["security_mode"] == "guarded"
-    assert project_json["log_paths"] == [".trainee/logs/**/*.log", ".trainee/runs/**/*.log"]
+    assert project_yaml["launch"]["command"] == ["python", "train.py"]
+    assert project_yaml["launch"]["baseline_config"] is None
+    assert project_yaml["launch"]["args"] == []
+    assert project_yaml["advanced"]["security_mode"] == "guarded"
+    assert project_yaml["advanced"]["log_paths"] == [".trainee/logs/**/*.log", ".trainee/runs/**/*.log"]
     assert "Toy Model" in context_md
-    assert trainee_dir / "project.json" in result["files_written"]
+    assert not (trainee_dir / "program.md").exists()
+    assert trainee_dir / "project.yaml" in result["files_written"]
     assert project / "README.md" in result["files_read"]
     assert result["already_initialized"] is False
 
@@ -71,8 +77,10 @@ def test_init_project_detects_initialized_project_and_keeps_files(tmp_path):
     project = tmp_path / "toymodel"
     trainee_dir = project / ".trainee"
     trainee_dir.mkdir(parents=True)
-    (trainee_dir / "project.json").write_text('{"custom": true}\n', encoding="utf-8")
+    project_yaml = _minimal_project_yaml()
+    (trainee_dir / "project.yaml").write_text(project_yaml, encoding="utf-8")
     (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
+    (trainee_dir / "program.md").write_text("custom rules\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
 
     result = init_project(project)
@@ -80,35 +88,104 @@ def test_init_project_detects_initialized_project_and_keeps_files(tmp_path):
     assert result["already_initialized"] is True
     assert result["files_written"] == []
     assert set(result["files_skipped"]) == {
-        trainee_dir / "project.json",
+        trainee_dir / "project.yaml",
         trainee_dir / "context.md",
         trainee_dir / "README.md",
     }
-    assert (trainee_dir / "project.json").read_text(encoding="utf-8") == '{"custom": true}\n'
+    assert (trainee_dir / "project.yaml").read_text(encoding="utf-8") == project_yaml
+    assert (trainee_dir / "program.md").read_text(encoding="utf-8") == "custom rules\n"
+
+
+def test_init_project_does_not_create_program_for_existing_project(tmp_path):
+    project = tmp_path / "toymodel"
+    trainee_dir = project / ".trainee"
+    trainee_dir.mkdir(parents=True)
+    project_yaml = _minimal_project_yaml()
+    (trainee_dir / "project.yaml").write_text(project_yaml, encoding="utf-8")
+    (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
+    (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
+
+    result = init_project(project)
+
+    assert result["files_written"] == []
+    assert (trainee_dir / "project.yaml").read_text(encoding="utf-8") == project_yaml
+    assert not (trainee_dir / "program.md").exists()
 
 
 def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     project = tmp_path / "toymodel"
     project.mkdir()
+    (project / "data").mkdir()
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (project / "config.yaml").write_text("epochs: 1\n", encoding="utf-8")
 
     exit_code = main(["init", str(project)])
 
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Trainee init" in output
+    assert "- Status: initialized new project files" in output
     assert "- Read: train.py" in output
-    assert "- Wrote: .trainee/project.json" in output
-    assert "- Next: review .trainee/context.md and .trainee/project.json, then run `trainee run`" in output
+    assert "- Wrote: .trainee/project.yaml" in output
+    assert "- Wrote: .trainee/program.md" not in output
+    assert "Discovery" in output
+    assert "- Environment: system" in output
+    assert "- Entrypoints: train.py" in output
+    assert "- Data candidates: data" in output
+    assert "- Config candidates: config.yaml" in output
+    assert "- Training limit candidates: none" in output
+    assert "Effective configuration" in output
+    assert "- Security: guarded" in output
+    assert "- Budget: max_rounds=3, timeout=60 minutes" in output
+    assert "- Data inputs: data" in output
+    assert "- Baseline config: not set" in output
+    assert "- Launch arguments: none" in output
+    assert "- Fixed arguments: none" in output
+    assert "- Tunable parameters: none" in output
+    assert "- Metrics: none (built-in loss/total_loss parsing only)" in output
+    assert "- Runtime: kill_on_stall=true, wandb=disabled" in output
+    assert (
+        "- Heartbeat: every 5s, stall after 120s; "
+        "sources=stdout; log_file_mtime(.trainee/logs/**/*.log, .trainee/runs/**/*.log)"
+    ) in output
+    assert "- Log paths: .trainee/logs/**/*.log, .trainee/runs/**/*.log" in output
+    assert "- Launcher: python train.py {extra_args}" in output
+    assert "- Review: .trainee/project.yaml and .trainee/context.md" in output
+    assert "- Validate: trainee doctor or trainee run --dry-run" in output
+    assert "- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`" in output
     assert "uvicorn" not in output.lower()
+
+
+def test_init_command_sets_explicit_baseline_config(tmp_path, capsys):
+    project = tmp_path / "toymodel"
+    (project / "configs").mkdir(parents=True)
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (project / "configs" / "base.yaml").write_text("lr: 0.001\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "init",
+            str(project),
+            "--baseline-config",
+            "configs/base.yaml",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
+    assert payload["launch"]["baseline_config"] == "configs/base.yaml"
+    output = capsys.readouterr().out
+    assert "- Baseline config: configs/base.yaml" in output
+    assert f"- Launcher: python train.py --config {project}/configs/base.yaml {{extra_args}}" in output
 
 
 def test_init_command_reports_already_initialized_project(tmp_path, capsys):
     project = tmp_path / "toymodel"
     trainee_dir = project / ".trainee"
     trainee_dir.mkdir(parents=True)
-    (trainee_dir / "project.json").write_text("{}\n", encoding="utf-8")
+    (trainee_dir / "project.yaml").write_text(_minimal_project_yaml(), encoding="utf-8")
     (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
+    (trainee_dir / "program.md").write_text("custom rules\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
 
     exit_code = main(["init", str(project)])
@@ -116,7 +193,7 @@ def test_init_command_reports_already_initialized_project(tmp_path, capsys):
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "- Status: already initialized; kept existing project files" in output
-    assert "- Kept: .trainee/project.json" in output
+    assert "- Kept: .trainee/project.yaml" in output
 
 
 def test_launch_alias_still_initializes_project(tmp_path, capsys):
@@ -129,7 +206,7 @@ def test_launch_alias_still_initializes_project(tmp_path, capsys):
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Trainee init" in output
-    assert (project / ".trainee" / "project.json").exists()
+    assert (project / ".trainee" / "project.yaml").exists()
 
 
 def test_webui_command_opens_browser_and_starts_service(monkeypatch):
@@ -158,16 +235,24 @@ def test_webui_command_opens_browser_and_starts_service(monkeypatch):
     assert captured["reload"] is True
 
 
+def test_version_command_prints_version_and_last_update(capsys):
+    exit_code = main(["version"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == "Trainee 0.1.0\nLast updated: 2026-06-25 13:09:19 +08:00\n"
+
+
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):
     project = tmp_path / "toymodel"
     project.mkdir()
+    (project / "data").mkdir()
     (project / "train.py").write_text("print('total_loss=0.5')\n", encoding="utf-8")
 
     assert main(["init", str(project)]) == 0
-    project_json_path = project / ".trainee" / "project.json"
-    project_json = json.loads(project_json_path.read_text(encoding="utf-8"))
-    project_json["max_rounds"] = 1
-    project_json_path.write_text(json.dumps(project_json), encoding="utf-8")
+    project_yaml_path = project / ".trainee" / "project.yaml"
+    project_yaml = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
+    project_yaml["run"]["max_rounds"] = 1
+    project_yaml_path.write_text(yaml.safe_dump(project_yaml, sort_keys=False), encoding="utf-8")
 
     exit_code = main(["run", str(project), "--unsafe"])
 
@@ -177,3 +262,17 @@ def test_run_command_executes_project_config_unsafe(tmp_path, capsys):
     assert "- Security: unsafe" in output
     assert "- Status: stopped" in output
     assert (project / ".trainee" / "runtime.sqlite3").exists()
+
+
+def _minimal_project_yaml() -> str:
+    return yaml.safe_dump(
+        {
+            "version": 1,
+            "launch": {
+                "environment": "system",
+                "command": ["python", "train.py"],
+                "args": [],
+            },
+        },
+        sort_keys=False,
+    )

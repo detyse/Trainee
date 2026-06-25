@@ -8,7 +8,9 @@ import httpx
 
 from trainee.decision import DecisionEngine
 from trainee.models import MetricSpec, ProjectContext, ProjectSpec, RoundRecord, TunableParam
-from trainee.settings import Settings, load_settings
+from trainee.prompt_assembler import PromptAssembler
+from trainee.research_state import ResearchStateBuilder
+from trainee.settings import Settings, load_default_system_prompt, load_settings
 
 
 def test_load_settings_defaults_runtime_data_to_repo_and_config_to_home(tmp_path, monkeypatch):
@@ -23,6 +25,40 @@ def test_load_settings_defaults_runtime_data_to_repo_and_config_to_home(tmp_path
     assert settings.artifacts_dir == tmp_path / "repo" / ".trainee" / "artifacts"
     assert settings.global_config_path == tmp_path / ".trainee" / "config.json"
     assert settings.config_path == settings.global_config_path
+    assert settings.agent_debug_enabled is False
+    assert settings.system_prompt == load_default_system_prompt()
+    saved = jsonlib.loads(settings.global_config_path.read_text(encoding="utf-8"))
+    assert saved["system_prompt"] == settings.system_prompt
+
+
+def test_load_settings_adds_default_system_prompt_without_overwriting_config(tmp_path):
+    config_path = tmp_path / "home" / ".trainee" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        jsonlib.dumps({"llm_provider": "none", "custom_key": {"keep": True}}),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(repo_root=tmp_path / "repo", global_config_path=config_path)
+
+    saved = jsonlib.loads(config_path.read_text(encoding="utf-8"))
+    assert settings.system_prompt == load_default_system_prompt()
+    assert saved["system_prompt"] == settings.system_prompt
+    assert saved["llm_provider"] == "none"
+    assert saved["custom_key"] == {"keep": True}
+
+
+def test_load_settings_rejects_invalid_system_prompt(tmp_path):
+    config_path = tmp_path / "home" / ".trainee" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(jsonlib.dumps({"system_prompt": "   "}), encoding="utf-8")
+
+    try:
+        load_settings(repo_root=tmp_path / "repo", global_config_path=config_path)
+    except ValueError as exc:
+        assert "system_prompt cannot be blank" in str(exc)
+    else:
+        raise AssertionError("blank system_prompt should be rejected")
 
 
 def test_load_settings_uses_project_root_for_runtime_data(tmp_path, monkeypatch):
@@ -150,6 +186,7 @@ def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
     assert settings.openai_base_url == "https://openai.example/v1"
     assert settings.openai_model == "gpt-custom"
     assert settings.llm_timeout_sec == 22.0
+    assert settings.agent_debug_enabled is False
 
 
 def test_trainee_data_dir_overrides_runtime_only(tmp_path, monkeypatch):
@@ -301,6 +338,7 @@ def test_decision_engine_uses_moonshot_chat_completions(monkeypatch):
         anthropic_model="claude-3-5-sonnet-latest",
         anthropic_version="2023-06-01",
         anthropic_max_tokens=512,
+        system_prompt="exact configured system prompt",
         moonshot_api_key="moonshot-key",
         moonshot_base_url="https://api.moonshot.cn/v1",
         moonshot_model="kimi-k2.6",
@@ -338,7 +376,16 @@ def test_decision_engine_uses_moonshot_chat_completions(monkeypatch):
         )
     ]
 
-    result = asyncio.run(engine.decide_with_prompt(spec, context, history, {"lr": 0.2}))
+    research_state = ResearchStateBuilder().build(spec, history)
+    result = asyncio.run(
+        engine.decide_with_prompt(
+            spec=spec,
+            context=context,
+            research_state=research_state,
+            current_params={"lr": 0.2},
+            prompt_documents=[],
+        )
+    )
     decision = result.decision
 
     assert decision.action == "continue"
@@ -351,14 +398,29 @@ def test_decision_engine_uses_moonshot_chat_completions(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer moonshot-key"
     assert captured["json"]["model"] == "kimi-k2.6"
     assert captured["json"]["messages"][0]["role"] == "system"
-    assert "JSON only" in captured["json"]["messages"][0]["content"]
+    assert captured["json"]["messages"][0]["content"] == "exact configured system prompt"
     user_prompt = captured["json"]["messages"][1]["content"]
     assert user_prompt.startswith("<STATIC_CONTEXT>\n")
     assert "\n</STATIC_CONTEXT>\n\n<DYNAMIC_ROUND_STATE>\n" in user_prompt
     assert '"tuning_prompt":"Try smaller lr when loss gets worse."' in user_prompt
 
-    prompt_a = engine._build_prompt(spec, context, history, {"lr": 0.2})
-    prompt_b = engine._build_prompt(spec, context, history, {"lr": 0.12})
+    assembler = PromptAssembler()
+    prompt_a = assembler.assemble(
+        spec,
+        context,
+        research_state,
+        {"lr": 0.2},
+        [],
+        "exact configured system prompt",
+    ).user_prompt
+    prompt_b = assembler.assemble(
+        spec,
+        context,
+        research_state,
+        {"lr": 0.12},
+        [],
+        "exact configured system prompt",
+    ).user_prompt
     static_a = prompt_a.split("\n</STATIC_CONTEXT>", 1)[0]
     static_b = prompt_b.split("\n</STATIC_CONTEXT>", 1)[0]
     assert static_a == static_b
@@ -460,7 +522,15 @@ def test_decision_engine_uses_anthropic_messages_api(monkeypatch):
         )
     ]
 
-    result = asyncio.run(engine.decide_with_prompt(spec, context, history, {"lr": 0.2}))
+    result = asyncio.run(
+        engine.decide_with_prompt(
+            spec=spec,
+            context=context,
+            research_state=ResearchStateBuilder().build(spec, history),
+            current_params={"lr": 0.2},
+            prompt_documents=[],
+        )
+    )
     decision = result.decision
 
     assert decision.action == "continue"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Literal
 
@@ -11,6 +11,17 @@ LLMProvider = Literal["none", "moonshot", "openai", "anthropic"]
 DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
 DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION = 3
+DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "defaults" / "system_prompt.txt"
+
+
+def load_default_system_prompt() -> str:
+    try:
+        content = DEFAULT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"default system prompt is unavailable: {DEFAULT_SYSTEM_PROMPT_PATH}") from exc
+    if not content.strip():
+        raise ValueError(f"default system prompt is empty: {DEFAULT_SYSTEM_PROMPT_PATH}")
+    return content
 
 
 @dataclass(frozen=True)
@@ -33,10 +44,12 @@ class Settings:
     anthropic_model: str
     anthropic_version: str
     anthropic_max_tokens: int
+    system_prompt: str = field(default_factory=load_default_system_prompt)
     moonshot_api_key: str | None = None
     moonshot_base_url: str = DEFAULT_MOONSHOT_BASE_URL
     moonshot_model: str = DEFAULT_MOONSHOT_MODEL
     max_image_analyses_per_session: int = DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION
+    agent_debug_enabled: bool = False
 
     @property
     def data_dir(self) -> Path:
@@ -66,6 +79,7 @@ def load_settings(
     )
     project_data_dir = _resolve_project_data_dir(repo_root, project_root, data_dir)
     config_payload = _read_config(global_config_path)
+    system_prompt = _ensure_system_prompt(global_config_path, config_payload)
     database_path = project_data_dir / "runtime.sqlite3"
     artifacts_dir = project_data_dir / "artifacts"
     return Settings(
@@ -90,6 +104,7 @@ def load_settings(
         anthropic_model=_settings_value("ANTHROPIC_MODEL", config_payload, "claude-3-5-haiku-latest"),
         anthropic_version=_settings_value("ANTHROPIC_VERSION", config_payload, "2023-06-01"),
         anthropic_max_tokens=int(_settings_value("ANTHROPIC_MAX_TOKENS", config_payload, "1024")),
+        system_prompt=system_prompt,
         max_image_analyses_per_session=int(
             _settings_value(
                 "TRAINEE_MAX_IMAGE_ANALYSES_PER_SESSION",
@@ -97,14 +112,15 @@ def load_settings(
                 str(DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION),
             )
         ),
+        agent_debug_enabled=_config_bool(config_payload, "agent_debug_enabled", False),
     )
 
 
-def save_provider_config(config_path: Path, payload: Dict[str, Any]) -> None:
+def save_global_config(config_path: Path, payload: Dict[str, Any]) -> None:
     config = _read_config(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for key in ("llm_provider", "llm_timeout_sec"):
+    for key in ("llm_provider", "llm_timeout_sec", "agent_debug_enabled", "system_prompt"):
         if key in payload:
             config[key] = payload[key]
 
@@ -122,6 +138,26 @@ def save_provider_config(config_path: Path, payload: Dict[str, Any]) -> None:
                 existing[key] = value
         config[provider] = existing
 
+    _write_config(config_path, config)
+
+
+def _ensure_system_prompt(config_path: Path, config: Dict[str, Any]) -> str:
+    if "system_prompt" not in config:
+        system_prompt = load_default_system_prompt()
+        config["system_prompt"] = system_prompt
+        _write_config(config_path, config)
+        return system_prompt
+
+    system_prompt = config["system_prompt"]
+    if not isinstance(system_prompt, str):
+        raise ValueError(f"{config_path} system_prompt must be a string")
+    if not system_prompt.strip():
+        raise ValueError(f"{config_path} system_prompt cannot be blank")
+    return system_prompt
+
+
+def _write_config(config_path: Path, config: Dict[str, Any]) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -204,6 +240,19 @@ def _provider_config_value(config_payload: Dict[str, Any], provider: str, key: s
     if not isinstance(provider_payload, dict):
         return None
     return provider_payload.get(key)
+
+
+def _config_bool(config_payload: Dict[str, Any], key: str, default: bool) -> bool:
+    value = config_payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    return bool(value)
 
 
 def _resolve_path(raw: str, repo_root: Path) -> Path:
