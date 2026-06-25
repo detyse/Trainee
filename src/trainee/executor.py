@@ -252,6 +252,8 @@ class TrainingExecutor:
         }
         if session_id is not None and round_index is not None:
             template_vars.update(self.round_workspace(spec, session_id, round_index).command_vars())
+        elif spec.uses_generated_config():
+            template_vars.update(self.round_workspace(spec, 0, 0).command_vars())
         if "{extra_args}" in spec.launcher_template:
             return spec.launcher_template.format_map(template_vars).strip()
         rendered = spec.launcher_template.format_map({k: v for k, v in template_vars.items() if k != "extra_args"}).strip()

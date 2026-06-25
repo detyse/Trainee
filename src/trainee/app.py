@@ -270,7 +270,12 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             normalized = normalized_project_config(project_root, config)
             spec = compile_project_spec(project_root, normalized)
             context = runtime.context_builder.build(spec)
-            result = await TunableDiscoveryEngine(runtime.settings).suggest(spec, context, limit=limit)
+            result = await TunableDiscoveryEngine(runtime.settings).suggest(
+                spec,
+                context,
+                limit=limit,
+                fixed_args=config.run.fixed_args,
+            )
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(result.model_dump(mode="json"))
@@ -479,6 +484,16 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         form = await request.form()
         try:
             project_root, config = _project_config_from_form(form)
+            review_response = await _render_tunable_review_response(
+                request,
+                templates,
+                runtime,
+                project_root,
+                config,
+                reviewed=_form_checkbox(form, "tunable_reviewed"),
+            )
+            if review_response is not None:
+                return review_response
             await _register_project_config(runtime, project_root, config)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -493,13 +508,18 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             normalized = normalized_project_config(project_root, config)
             spec = compile_project_spec(project_root, normalized)
             context = runtime.context_builder.build(spec)
-            result = await TunableDiscoveryEngine(runtime.settings).suggest(spec, context)
+            result = await TunableDiscoveryEngine(runtime.settings).suggest(
+                spec,
+                context,
+                fixed_args=config.run.fixed_args,
+            )
             suggested_config, _ = apply_tunable_suggestions(config, result.suggestions)
+            suggested_spec = compile_project_spec(project_root, normalized_project_config(project_root, suggested_config))
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         payload = runtime.dashboard_payload()
         payload["project_config"] = suggested_config
-        payload["spec"] = spec
+        payload["spec"] = suggested_spec
         payload["project_config_path"] = str(project_config_path(project_root))
         payload["tunable_discovery"] = result
         return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
@@ -749,6 +769,39 @@ def _health_payload(request: Request) -> Dict[str, Any]:
         "llm_provider": runtime.settings.llm_provider,
         "db_ok": db_ok,
     }
+
+
+async def _render_tunable_review_response(
+    request: Request,
+    templates: Jinja2Templates,
+    runtime: RuntimeService,
+    project_root: Path,
+    config: ProjectConfig,
+    *,
+    reviewed: bool,
+) -> Optional[HTMLResponse]:
+    if reviewed or config.tuning.params or not config.launch.baseline_config:
+        return None
+
+    normalized = normalized_project_config(project_root, config)
+    spec = compile_project_spec(project_root, normalized)
+    context = runtime.prepare_project_registration(spec)
+    result = await TunableDiscoveryEngine(runtime.settings).suggest(
+        spec,
+        context,
+        fixed_args=config.run.fixed_args,
+    )
+    suggested_config, applied = apply_tunable_suggestions(config, result.suggestions)
+    if not applied:
+        return None
+
+    suggested_spec = compile_project_spec(project_root, normalized_project_config(project_root, suggested_config))
+    payload = runtime.dashboard_payload()
+    payload["project_config"] = suggested_config
+    payload["spec"] = suggested_spec
+    payload["project_config_path"] = str(project_config_path(project_root))
+    payload["tunable_discovery"] = result
+    return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
 
 
 async def _register_project_config(

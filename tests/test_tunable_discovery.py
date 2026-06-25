@@ -99,6 +99,38 @@ def test_apply_tunable_suggestions_skips_fixed_arg_exclusions() -> None:
     assert [item.name for item in updated.tuning.params] == ["theta_weight"]
 
 
+def test_heuristic_discovery_excludes_fixed_arg_config_paths(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "configs").mkdir(parents=True)
+    (project / "configs" / "fit.yaml").write_text(
+        """
+fit:
+  stages:
+    global:
+      max_iters: 1000
+  term_weights:
+    theta: 9.0
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = ProjectConfig(
+        launch=LaunchConfig(command=["python", "train.py"], baseline_config="configs/fit.yaml"),
+        run=RunConfig(fixed_args=[CommandArg(flag="--max-iter", value=1000)]),
+    )
+    spec = compile_project_spec(project, config)
+    context = ContextBuilder().build(spec)
+
+    result = suggest_tunable_params_heuristic(
+        spec,
+        context,
+        exclusions={"--max-iter", "max_iter"},
+    )
+
+    paths = {item.config_path for item in result.suggestions}
+    assert "fit.term_weights.theta" in paths
+    assert "fit.stages.global.max_iters" not in paths
+
+
 def test_tunable_discovery_api_suggests_then_applies(runtime_env) -> None:
     client = runtime_env["client"]
     project = runtime_env["external_project"]

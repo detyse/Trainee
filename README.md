@@ -110,7 +110,9 @@ trainee init --baseline-config configs/base.yaml
 trainee init --force
 ```
 
-`--baseline-config` must point to an existing file inside the project. Trainee records it as `launch.baseline_config` and passes it to the launcher as `--config <absolute-path>`.
+`--baseline-config` must point to an existing file inside the project. Trainee records it as `launch.baseline_config`; each round copies it to `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that generated path to the launcher as `--config <path>`.
+
+When a new config is initialized with `--baseline-config`, Trainee uses the project context and baseline config to generate `tuning.params` automatically. It uses the configured LLM when available and falls back to conservative heuristics. Review the generated whitelist before running. `run.fixed_args` are excluded from discovery.
 
 Detected config files are suggestions only. Trainee does not automatically choose `config.yaml`, `environment.yml`, or any other config as the baseline.
 
@@ -201,15 +203,17 @@ advanced:
 
 Trainee appends arguments in this order:
 
-1. `launch.baseline_config` as `--config <path>`, if set. When config-backed tunable parameters are configured, Trainee first writes a per-round config at `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that path instead.
+1. `launch.baseline_config` as a generated per-round config path, if set. Trainee first writes `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that path as `--config <path>`.
 2. `launch.args`.
 3. `data` entries that have a `flag`.
 4. `run.fixed_args`.
 5. Agent-controlled `tuning.params`.
 
-Only `tuning.params` may be changed by the agent. `run.fixed_args` stay constant across every round and exclude matching names or flags from `tuning.params`.
+Only `tuning.params` may be changed by the agent. `run.fixed_args` stay constant across every round and exclude matching names, flags, or config path keys from `tuning.params`.
 
-Use `tuning.params[].config_path` for agent-controlled edits to fields inside `launch.baseline_config`. Config-backed tunable parameters are written into the generated per-round config and are not appended as CLI flags.
+`trainee init --baseline-config ...` writes discovered parameters directly into the new project config and reminds you to review them. `trainee suggest-tunables` can rerun discovery later. The Web UI keeps an explicit review step before saving suggestions, and the tool API exposes separate suggest/apply calls.
+
+Use `tuning.params[].config_path` for agent-controlled edits to fields inside `launch.baseline_config`. Config-backed tunable parameters are written into the generated per-round config and are not appended as CLI flags. If `tuning.params` is empty, Trainee still writes the per-round config unchanged; the agent simply has no approved parameters to change.
 
 For commands that cannot be expressed structurally, use `advanced.shell_command`. Include `{extra_args}` where the generated tunable parameters should be inserted.
 

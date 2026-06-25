@@ -125,11 +125,48 @@ def test_config_backed_tunables_use_generated_round_config(tmp_path: Path) -> No
     assert "theta_weight" not in command
 
 
+def test_baseline_config_without_tunables_still_uses_generated_round_config(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "configs").mkdir()
+    baseline = project / "configs" / "base.yaml"
+    baseline.write_text(
+        """
+data:
+  max_frames: 5
+fit:
+  term_weights:
+    theta: 9.0
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = ProjectConfig(
+        launch=LaunchConfig(
+            command=["python", "-m", "src.run_fitting"],
+            baseline_config="configs/base.yaml",
+        ),
+    )
+
+    spec = compile_project_spec(project, config)
+    executor = TrainingExecutor()
+    workspace = executor.round_workspace(spec, session_id=1, round_index=1)
+    command = executor.render_command(spec, {}, session_id=1, round_index=1)
+    written = executor.write_round_config(spec, {}, workspace)
+
+    assert spec.uses_generated_config()
+    assert f"--config {project}/.trainee/runs/session-0001/round-0001/config.yaml" in command
+    assert str(baseline) not in command
+    assert written == workspace.config_path
+    assert yaml.safe_load(workspace.config_path.read_text(encoding="utf-8")) == yaml.safe_load(
+        baseline.read_text(encoding="utf-8")
+    )
+
+
 def test_fixed_args_exclude_matching_tunable_flags_and_names() -> None:
     for tunable in (
         {"name": "max_iter", "flag": "--train-max-iter", "type": "int"},
         {"name": "other", "flag": "--max-iter", "type": "int"},
-        {"name": "max_iter", "config_path": "fit.stages.global.max_iters", "type": "int"},
+        {"name": "global_iterations", "config_path": "fit.stages.global.max_iters", "type": "int"},
     ):
         with pytest.raises(ValueError, match="tuning.params must not include run.fixed_args"):
             ProjectConfig(
@@ -251,27 +288,49 @@ def test_web_ui_saves_the_same_project_yaml(runtime_env) -> None:
     project = runtime_env["external_project"]
     (project / "configs").mkdir(exist_ok=True)
     (project / "configs" / "base.yaml").write_text("lr: 0.1\n", encoding="utf-8")
+    form = {
+        "project_root": str(project),
+        "data_lines": "data | --data-root",
+        "launch_environment": "system",
+        "launch_env_name": "",
+        "launch_command": "python train.py",
+        "baseline_config": "configs/base.yaml",
+        "launch_args_lines": "--log-file=.trainee/logs/train.log",
+        "max_rounds": "2",
+        "timeout_minutes": "5",
+        "fixed_args_lines": "--max-iter=10",
+        "tunable_params_yaml": "[]",
+        "metric_specs_yaml": "[]",
+        "metric_prompt": "",
+        "tuning_prompt": "",
+        "working_dir": ".",
+        "security_mode": "unsafe",
+        "advanced_yaml": "{}",
+    }
     response = client.post(
         "/ui/project/register",
-        data={
-            "project_root": str(project),
-            "data_lines": "data | --data-root",
-            "launch_environment": "system",
-            "launch_env_name": "",
-            "launch_command": "python train.py",
-            "baseline_config": "configs/base.yaml",
-            "launch_args_lines": "--log-file=.trainee/logs/train.log",
-            "max_rounds": "2",
-            "timeout_minutes": "5",
-            "fixed_args_lines": "--max-iter=10",
-            "tunable_params_yaml": "[]",
-            "metric_specs_yaml": "[]",
-            "metric_prompt": "",
-            "tuning_prompt": "",
-            "working_dir": ".",
-            "security_mode": "unsafe",
-            "advanced_yaml": "{}",
-        },
+        data=form,
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert "Suggested 1 tunable parameter" in response.text
+    assert not (project / ".trainee" / "project.yaml").exists()
+
+    form.update(
+        {
+            "tunable_reviewed": "1",
+            "tunable_params_yaml": """
+- name: lr
+  config_path: lr
+  type: float
+  default: 0.1
+""".lstrip(),
+        }
+    )
+    response = client.post(
+        "/ui/project/register",
+        data=form,
         headers={"HX-Request": "true"},
     )
 
@@ -280,6 +339,7 @@ def test_web_ui_saves_the_same_project_yaml(runtime_env) -> None:
     assert payload["data"] == [{"path": "data", "flag": "--data-root"}]
     assert payload["launch"]["baseline_config"] == "configs/base.yaml"
     assert payload["run"]["fixed_args"] == [{"flag": "--max-iter", "value": 10}]
+    assert payload["tuning"]["params"][0]["config_path"] == "lr"
     assert client.get("/api/project").json()["config"]["run"]["max_rounds"] == 2
 
 

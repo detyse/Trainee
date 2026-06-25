@@ -136,15 +136,19 @@ def fixed_arg_exclusions(fixed_args: Iterable[CommandArg]) -> set[str]:
     exclusions: set[str] = set()
     for item in fixed_args:
         exclusions.add(item.flag)
-        exclusions.add(_param_key(item.flag))
+        exclusions.update(_param_aliases(item.flag))
     return exclusions
 
 
 def tunable_excluded_by_fixed_args(param: TunableParam, exclusions: set[str]) -> bool:
-    candidates = {param.name, _param_key(param.name)}
+    candidates = {param.name, *_param_aliases(param.name)}
     if param.flag:
         candidates.add(param.flag)
-        candidates.add(_param_key(param.flag))
+        candidates.update(_param_aliases(param.flag))
+    if param.config_path:
+        candidates.update(_param_aliases(param.config_path))
+        for segment in param.config_path.split("."):
+            candidates.update(_param_aliases(segment))
     return bool(candidates & exclusions)
 
 
@@ -383,10 +387,7 @@ def _render_launcher(project_root: Path, config: ProjectConfig) -> str:
 
 
 def _uses_generated_config(config: ProjectConfig) -> bool:
-    return bool(
-        config.launch.baseline_config
-        and any(item.config_path for item in config.tuning.params)
-    )
+    return bool(config.launch.baseline_config)
 
 
 def _quote_command(command: list[str]) -> str:
@@ -403,6 +404,29 @@ def _render_arg(item: CommandArg) -> str:
 
 def _param_key(value: str) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", value.lstrip("-")).strip("_").lower()
+
+
+def _param_aliases(value: str) -> set[str]:
+    key = _param_key(value)
+    if not key:
+        return set()
+    parts = key.split("_")
+    singular = "_".join(_singularize_param_part(part) for part in parts)
+    return {key, singular}
+
+
+def _singularize_param_part(value: str) -> str:
+    aliases = {
+        "iterations": "iter",
+        "iteration": "iter",
+        "iters": "iter",
+        "epochs": "epoch",
+    }
+    if value in aliases:
+        return aliases[value]
+    if len(value) > 3 and value.endswith("s") and not value.endswith(("ss", "us", "is")):
+        return value[:-1]
+    return value
 
 
 def _resolve_project_path(project_root: Path, raw_path: str) -> Path:

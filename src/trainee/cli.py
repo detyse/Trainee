@@ -266,10 +266,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "init":
         try:
-            result = init_project(
-                Path(args.project_root),
-                force=args.force,
-                baseline_config=args.baseline_config,
+            result = asyncio.run(
+                initialize_project(
+                    Path(args.project_root),
+                    force=args.force,
+                    baseline_config=args.baseline_config,
+                )
             )
         except (OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -414,7 +416,7 @@ def fetch_report(
     return text
 
 
-def init_project(
+async def initialize_project(
     project_root: Path,
     force: bool = False,
     baseline_config: str | None = None,
@@ -435,13 +437,30 @@ def init_project(
         baseline_config=baseline_config,
     )
     config_path = project_config_path(project_root)
-    config = load_project_config(project_root) if config_path.is_file() and not force else generated_config
+    generate_config = force or not config_path.is_file()
+    config = generated_config if generate_config else load_project_config(project_root)
     spec = compile_project_spec(project_root, config)
     context = ContextBuilder().build(spec)
+    tunable_discovery = None
+    applied_tunables = []
+    if generate_config and config.launch.baseline_config:
+        settings = load_settings(repo_root=project_root, project_root=project_root)
+        tunable_discovery = await TunableDiscoveryEngine(settings).suggest(
+            spec,
+            context,
+            fixed_args=config.run.fixed_args,
+        )
+        config, applied_tunables = apply_tunable_suggestions(
+            config,
+            tunable_discovery.suggestions,
+            replace=True,
+        )
+        spec = compile_project_spec(project_root, config)
+        context = ContextBuilder().build(spec)
     files_read = _launch_read_targets(project_root)
 
     outputs = {
-        config_path: _render_project_yaml(generated_config),
+        config_path: _render_project_yaml(config),
         trainee_dir / "context.md": _render_context_markdown(context),
         trainee_dir / "README.md": _render_launch_readme(project_root, discovery),
     }
@@ -468,8 +487,24 @@ def init_project(
         "already_initialized": already_initialized,
         "launcher_template": spec.launcher_template,
         "discovery": discovery,
+        "tunable_discovery": tunable_discovery,
+        "applied_tunables": applied_tunables,
         "warnings": context.warnings,
     }
+
+
+def init_project(
+    project_root: Path,
+    force: bool = False,
+    baseline_config: str | None = None,
+) -> dict[str, Any]:
+    return asyncio.run(
+        initialize_project(
+            project_root,
+            force=force,
+            baseline_config=baseline_config,
+        )
+    )
 
 
 def launch_project(project_root: Path, force: bool = False) -> dict[str, Any]:
@@ -518,7 +553,12 @@ async def suggest_tunables(
     spec = compile_project_spec(project_root, config)
     context = ContextBuilder().build(spec)
     settings = load_settings(repo_root=project_root, project_root=project_root)
-    result = await TunableDiscoveryEngine(settings).suggest(spec, context, limit=limit)
+    result = await TunableDiscoveryEngine(settings).suggest(
+        spec,
+        context,
+        limit=limit,
+        fixed_args=config.run.fixed_args,
+    )
     applied = []
     if apply:
         updated, applied = apply_tunable_suggestions(config, result.suggestions, replace=replace)
@@ -718,10 +758,29 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     print(f"- Launcher: {launcher}")
 
     print("")
+    print("Tunable discovery")
+    tunable_discovery = result["tunable_discovery"]
+    if tunable_discovery is None:
+        reason = (
+            "kept existing project.yaml"
+            if not result["force"] and Path(result["config_path"]) in result["files_skipped"]
+            else "launch.baseline_config is not set"
+        )
+        print(f"- Status: skipped ({reason})")
+    else:
+        source = tunable_discovery.source
+        if source == "llm":
+            source += f" ({tunable_discovery.provider}:{tunable_discovery.model})"
+        print(f"- Source: {source}")
+        print(f"- Generated: {len(result['applied_tunables'])} parameter(s) in tuning.params")
+        for warning in tunable_discovery.warnings:
+            print(f"- Warning: {warning}")
+
+    print("")
     print("Next")
-    print("- Review: .trainee/project.yaml and .trainee/context.md")
+    print("- Review: .trainee/project.yaml tuning.params and .trainee/context.md")
     print("- Validate: trainee doctor or trainee run --dry-run")
-    print("- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`")
+    print("- Next: adjust generated parameters if needed, run `trainee doctor`, then run `trainee run`")
     for warning in result["warnings"]:
         print(f"- Warning: {warning}")
 
@@ -877,12 +936,14 @@ def _render_launch_readme(project_root: Path, discovery: Any) -> str:
             "",
             "Recommended workflow:",
             "",
-            "1. Edit `project.yaml`: select `launch.baseline_config` and confirm data, environment, command, fixed limits, tunable parameters, and metrics.",
+            "1. Edit `project.yaml`: select `launch.baseline_config` and confirm data, environment, command, fixed limits, and metrics.",
             "2. Review `context.md` for the generated project understanding.",
-            "3. Run `trainee doctor` or `trainee run --dry-run` and inspect the baseline command.",
-            "4. Run `trainee run`.",
+            "3. Re-run `trainee init --force --baseline-config <path>` to regenerate config-backed `tuning.params`, then review them.",
+            "4. Run `trainee doctor` or `trainee run --dry-run` and inspect the baseline command.",
+            "5. Run `trainee run`.",
             "",
             "`run.fixed_args` are constant in every round. Only `tuning.params` may be changed by the agent.",
+            "Fixed arguments exclude matching tunable names, flags, and config path keys from discovery.",
             "Detected config files are suggestions only; Trainee never selects one automatically.",
             "Use `advanced.shell_command` only when the structured launcher cannot express the command.",
             "Guarded runs make the host filesystem read-only and keep writes inside this `.trainee/` directory.",

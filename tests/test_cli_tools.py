@@ -150,13 +150,17 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     ) in output
     assert "- Log paths: .trainee/logs/**/*.log, .trainee/runs/**/*.log" in output
     assert "- Launcher: python train.py {extra_args}" in output
-    assert "- Review: .trainee/project.yaml and .trainee/context.md" in output
+    assert "Tunable discovery" in output
+    assert "- Status: skipped (launch.baseline_config is not set)" in output
+    assert "- Review: .trainee/project.yaml tuning.params and .trainee/context.md" in output
     assert "- Validate: trainee doctor or trainee run --dry-run" in output
-    assert "- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`" in output
+    assert "- Next: adjust generated parameters if needed, run `trainee doctor`, then run `trainee run`" in output
     assert "uvicorn" not in output.lower()
 
 
-def test_init_command_sets_explicit_baseline_config(tmp_path, capsys):
+def test_init_command_sets_explicit_baseline_config(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
     project = tmp_path / "toymodel"
     (project / "configs").mkdir(parents=True)
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
@@ -174,9 +178,40 @@ def test_init_command_sets_explicit_baseline_config(tmp_path, capsys):
     assert exit_code == 0
     payload = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
     assert payload["launch"]["baseline_config"] == "configs/base.yaml"
+    assert payload["tuning"]["params"][0]["config_path"] == "lr"
     output = capsys.readouterr().out
     assert "- Baseline config: configs/base.yaml" in output
-    assert f"- Launcher: python train.py --config {project}/configs/base.yaml {{extra_args}}" in output
+    assert "- Launcher: python train.py --config {config_path} {extra_args}" in output
+    assert "- Source: heuristic" in output
+    assert "- Generated: 1 parameter(s) in tuning.params" in output
+
+
+def test_init_excludes_fixed_args_from_generated_tunables(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
+    project = tmp_path / "toymodel"
+    (project / "configs").mkdir(parents=True)
+    (project / "train.py").write_text(
+        'parser.add_argument("--max-iter", type=int, default=1000)\n',
+        encoding="utf-8",
+    )
+    (project / "configs" / "base.yaml").write_text(
+        """
+fit:
+  stages:
+    global:
+      max_iters: 1000
+  term_weights:
+    theta: 9.0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = init_project(project, baseline_config="configs/base.yaml")
+
+    paths = {item.config_path for item in result["config"].tuning.params}
+    assert "fit.term_weights.theta" in paths
+    assert "fit.stages.global.max_iters" not in paths
 
 
 def test_init_command_reports_already_initialized_project(tmp_path, capsys):
@@ -239,7 +274,7 @@ def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.1.0\nLast updated: 2026-06-25 13:09:19 +08:00\n"
+    assert capsys.readouterr().out == "Trainee 0.2.0\nLast updated: 2026-06-25 21:17:55 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):

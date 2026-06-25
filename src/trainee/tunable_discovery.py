@@ -11,7 +11,13 @@ from pydantic import BaseModel, Field, model_validator
 
 from trainee.decision import DecisionEngine
 from trainee.models import ParamType, ProjectContext, ProjectSpec, TunableParam
-from trainee.project_config import ProjectConfig, TuningConfig, fixed_arg_exclusions, tunable_excluded_by_fixed_args
+from trainee.project_config import (
+    CommandArg,
+    ProjectConfig,
+    TuningConfig,
+    fixed_arg_exclusions,
+    tunable_excluded_by_fixed_args,
+)
 from trainee.providers import active_model, provider_is_configured
 from trainee.settings import Settings
 
@@ -77,8 +83,10 @@ class TunableDiscoveryEngine:
         context: ProjectContext,
         *,
         limit: int = 8,
+        fixed_args: Iterable[CommandArg] = (),
     ) -> TunableDiscoveryResult:
-        heuristic = suggest_tunable_params_heuristic(spec, context, limit=limit)
+        exclusions = fixed_arg_exclusions(fixed_args)
+        heuristic = suggest_tunable_params_heuristic(spec, context, limit=limit, exclusions=exclusions)
         if not provider_is_configured(self.settings):
             return heuristic
 
@@ -90,7 +98,7 @@ class TunableDiscoveryEngine:
                 _discovery_user_prompt(spec, context, heuristic, leaves, limit),
             )
             payload = _extract_json_object(completion.content)
-            suggestions = _suggestions_from_payload(payload, leaves, spec, limit)
+            suggestions = _suggestions_from_payload(payload, leaves, spec, limit, exclusions)
         except Exception as exc:
             return heuristic.model_copy(
                 update={
@@ -121,8 +129,10 @@ def suggest_tunable_params_heuristic(
     context: ProjectContext,
     *,
     limit: int = 8,
+    exclusions: Optional[set[str]] = None,
 ) -> TunableDiscoveryResult:
     warnings: list[str] = []
+    exclusions = exclusions or set()
     if not spec.baseline_config_path:
         return TunableDiscoveryResult(
             source="heuristic",
@@ -147,7 +157,10 @@ def suggest_tunable_params_heuristic(
         if path in existing_targets:
             continue
         suggestion = _heuristic_suggestion(path, value, context_text)
-        if suggestion is None:
+        if suggestion is None or tunable_excluded_by_fixed_args(
+            suggestion.to_tunable_param(),
+            exclusions,
+        ):
             continue
         score = _score_path(path, value, context_text)
         scored.append((score, suggestion))
@@ -387,6 +400,7 @@ def _suggestions_from_payload(
     leaves: dict[str, Any],
     spec: ProjectSpec,
     limit: int,
+    exclusions: set[str],
 ) -> list[TunableParamSuggestion]:
     raw = payload.get("suggestions", [])
     if not isinstance(raw, list):
@@ -411,9 +425,12 @@ def _suggestions_from_payload(
         candidate.setdefault("min_value", min_value)
         candidate.setdefault("max_value", max_value)
         try:
-            suggestions.append(TunableParamSuggestion.model_validate(candidate))
+            suggestion = TunableParamSuggestion.model_validate(candidate)
         except ValueError:
             continue
+        if tunable_excluded_by_fixed_args(suggestion.to_tunable_param(), exclusions):
+            continue
+        suggestions.append(suggestion)
         seen.add(path)
         if len(suggestions) >= limit:
             break

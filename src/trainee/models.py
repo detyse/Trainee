@@ -225,10 +225,7 @@ class ProjectSpec(BaseModel):
         return list(self.log_paths)
 
     def uses_generated_config(self) -> bool:
-        return bool(
-            self.baseline_config_path
-            and any(item.config_path for item in self.tunable_params)
-        )
+        return bool(self.baseline_config_path)
 
 
 def _dedupe(values: List[str]) -> List[str]:
