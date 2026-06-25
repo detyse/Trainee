@@ -13,6 +13,8 @@ from typing import Iterable, Literal
 from pydantic import ValidationError
 
 from trainee.models import ProjectSpec, TunableParam
+from trainee.executor import TrainingExecutor
+from trainee.project_config import compile_project_spec, load_project_config
 from trainee.security import SANDBOX_DIRS
 from trainee.settings import Settings, load_settings
 
@@ -41,20 +43,29 @@ class DoctorReport:
     project_root: Path
     sections: list[DoctorSection]
     fixes: list[str]
+    baseline_command: str = ""
 
     @property
     def has_failures(self) -> bool:
         return any(finding.status == "fail" for section in self.sections for finding in section.findings)
 
 
-def run_doctor(project_root: Path) -> DoctorReport:
+def run_doctor(project_root: Path, security_mode: str | None = None) -> DoctorReport:
     project_root = project_root.expanduser().resolve()
     sections: list[DoctorSection] = []
     fixes: list[str] = []
 
-    project_section, spec = _check_project(project_root)
+    project_section, spec = _check_project(project_root, security_mode=security_mode)
     sections.append(project_section)
     _collect_fixes(project_section, fixes)
+
+    data_section = _check_data(project_root, spec)
+    sections.append(data_section)
+    _collect_fixes(data_section, fixes)
+
+    path_section = _check_runtime_paths(project_root, spec)
+    sections.append(path_section)
+    _collect_fixes(path_section, fixes)
 
     environment_section = _check_environment(project_root, spec)
     sections.append(environment_section)
@@ -72,7 +83,18 @@ def run_doctor(project_root: Path) -> DoctorReport:
     sections.append(llm_section)
     _collect_fixes(llm_section, fixes)
 
-    return DoctorReport(project_root=project_root, sections=sections, fixes=fixes)
+    baseline_command = ""
+    if spec is not None:
+        try:
+            baseline_command = TrainingExecutor().render_command(
+                spec,
+                spec.default_params(),
+                session_id=1,
+                round_index=1,
+            )
+        except (OSError, ValueError, KeyError):
+            baseline_command = ""
+    return DoctorReport(project_root=project_root, sections=sections, fixes=fixes, baseline_command=baseline_command)
 
 
 def format_doctor_report(report: DoctorReport) -> str:
@@ -92,11 +114,15 @@ def format_doctor_report(report: DoctorReport) -> str:
             lines.extend(["", "Fix:"])
             lines.extend(f"  {fix}" for fix in report.fixes)
     else:
-        lines.extend(["  ready to run:", "    trainee run"])
+        lines.append("  ready")
+    if report.baseline_command:
+        lines.extend(["", "Baseline command", f"  {report.baseline_command}"])
+    if not report.has_failures:
+        lines.extend(["", "Run:", "  trainee run"])
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _check_project(project_root: Path) -> tuple[DoctorSection, ProjectSpec | None]:
+def _check_project(project_root: Path, security_mode: str | None = None) -> tuple[DoctorSection, ProjectSpec | None]:
     section = DoctorSection("Project")
     spec: ProjectSpec | None = None
     section.add("ok" if project_root.is_dir() else "fail", f"root: {project_root}")
@@ -104,10 +130,10 @@ def _check_project(project_root: Path) -> tuple[DoctorSection, ProjectSpec | Non
         return section, None
 
     trainee_dir = project_root / ".trainee"
-    project_json = trainee_dir / "project.json"
+    project_yaml = trainee_dir / "project.yaml"
     for path, label in (
         (trainee_dir, ".trainee exists"),
-        (project_json, ".trainee/project.json exists"),
+        (project_yaml, ".trainee/project.yaml exists"),
         (trainee_dir / "runs", ".trainee/runs exists"),
         (trainee_dir / "logs", ".trainee/logs exists"),
     ):
@@ -116,18 +142,50 @@ def _check_project(project_root: Path) -> tuple[DoctorSection, ProjectSpec | Non
         else:
             section.add("fail", f"{label}: missing", fix="trainee init")
 
-    if project_json.is_file():
+    if project_yaml.is_file():
         try:
-            payload = json.loads(project_json.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("project.json must contain a JSON object")
-            spec = ProjectSpec.model_validate(payload)
-            section.add("ok", "project.json is valid")
-        except (OSError, ValueError, ValidationError, json.JSONDecodeError) as exc:
-            section.add("fail", f"project.json is invalid: {exc}", fix="trainee init --force")
+            config = load_project_config(project_root)
+            spec = compile_project_spec(project_root, config, security_mode=security_mode)
+            section.add("ok", "project.yaml is valid")
+            section.add("ok", f"max rounds: {spec.max_rounds}")
+            if spec.round_timeout_sec is not None:
+                section.add("ok", f"round timeout: {spec.round_timeout_sec / 60:g} minutes")
+        except (OSError, ValueError, ValidationError) as exc:
+            section.add("fail", f"project.yaml is invalid: {exc}", fix="edit .trainee/project.yaml")
 
     _check_git(project_root, section)
     return section, spec
+
+
+def _check_data(project_root: Path, spec: ProjectSpec | None) -> DoctorSection:
+    section = DoctorSection("Data")
+    if spec is None:
+        section.add("fail", "data unavailable because project config is invalid", fix="edit .trainee/project.yaml")
+        return section
+    if not spec.data_paths:
+        section.add("fail", "no data paths configured", fix="add at least one entry under data in .trainee/project.yaml")
+        return section
+    for raw_path in spec.data_paths:
+        path = Path(raw_path)
+        if path.exists():
+            section.add("ok", f"data: {path}")
+        else:
+            section.add("fail", f"data path does not exist: {path}", fix="edit data paths in .trainee/project.yaml")
+    return section
+
+
+def _check_runtime_paths(project_root: Path, spec: ProjectSpec | None) -> DoctorSection:
+    section = DoctorSection("Paths")
+    if spec is None:
+        section.add("fail", "runtime paths unavailable because project config is invalid", fix="edit .trainee/project.yaml")
+        return section
+    try:
+        TrainingExecutor().validate_paths(spec, project_root / ".trainee" / "artifacts")
+    except ValueError as exc:
+        section.add("fail", str(exc), fix="keep working_dir, data, logs, and metrics inside the project root")
+    else:
+        section.add("ok", "runtime paths stay inside the project root")
+    return section
 
 
 def _check_git(project_root: Path, section: DoctorSection) -> None:
@@ -150,8 +208,22 @@ def _check_git(project_root: Path, section: DoctorSection) -> None:
 def _check_environment(project_root: Path, spec: ProjectSpec | None) -> DoctorSection:
     section = DoctorSection("Environment")
     launcher = spec.launcher_template if spec else ""
+    conda_env = _detect_conda_env(project_root, launcher) if re.search(r"(^|\s)conda\s+run(\s|$)", launcher) else None
 
-    if _is_uv_project(project_root):
+    if conda_env is not None:
+        section.add("ok", "conda launcher configured")
+        conda = shutil.which("conda")
+        if conda is None:
+            section.add("fail", "conda not found", fix="install conda or adjust launch.environment in .trainee/project.yaml")
+            return section
+        section.add("ok", f"conda found: {conda}")
+        if _conda_env_exists(conda, conda_env):
+            section.add("ok", f"conda env found: {conda_env}")
+        else:
+            section.add("fail", f"conda env {conda_env} not found", fix=f"conda env create -n {conda_env}")
+        return section
+
+    if launcher.startswith("uv run ") or (not launcher and _is_uv_project(project_root)):
         section.add("ok", "uv project detected")
         uv = shutil.which("uv")
         if uv is None:
@@ -166,7 +238,7 @@ def _check_environment(project_root: Path, spec: ProjectSpec | None) -> DoctorSe
         return section
 
     venv = project_root / ".venv"
-    if venv.exists():
+    if "/.venv/bin/python" in launcher or (not launcher and venv.exists()):
         section.add("ok", ".venv detected")
         python = venv / "bin" / "python"
         if python.is_file():
@@ -175,12 +247,12 @@ def _check_environment(project_root: Path, spec: ProjectSpec | None) -> DoctorSe
             section.add("fail", ".venv/bin/python not found", fix="python -m venv .venv")
         return section
 
-    conda_env = _detect_conda_env(project_root, launcher)
-    if conda_env is not None or (project_root / "environment.yml").is_file() or (project_root / "environment.yaml").is_file():
+    if not launcher and ((project_root / "environment.yml").is_file() or (project_root / "environment.yaml").is_file()):
+        conda_env = _detect_conda_env(project_root, launcher)
         section.add("ok", "conda project detected")
         conda = shutil.which("conda")
         if conda is None:
-            section.add("fail", "conda not found", fix="install conda or adjust launcher_template")
+            section.add("fail", "conda not found", fix="install conda or adjust launch.environment in .trainee/project.yaml")
             return section
         section.add("ok", f"conda found: {conda}")
         if conda_env is None:
@@ -208,14 +280,20 @@ def _check_launcher(project_root: Path, spec: ProjectSpec | None) -> DoctorSecti
 
     launcher = spec.launcher_template.strip()
     if not launcher:
-        section.add("fail", "launcher_template is empty", fix="edit .trainee/project.json")
+        section.add("fail", "compiled launcher is empty", fix="edit launch.command in .trainee/project.yaml")
         return section
 
     entrypoint = _detect_train_entrypoint(launcher)
     if entrypoint:
-        section.add("ok", f"train entrypoint: {entrypoint}")
+        entrypoint_path = Path(entrypoint)
+        if not entrypoint_path.is_absolute():
+            entrypoint_path = project_root / entrypoint_path
+        if entrypoint_path.is_file():
+            section.add("ok", f"train entrypoint: {entrypoint}")
+        else:
+            section.add("fail", f"train entrypoint not found: {entrypoint}", fix="edit launch.command in .trainee/project.yaml")
     else:
-        section.add("warn", "train entrypoint not detected")
+        section.add("fail", "train entrypoint not detected", fix="edit launch.command in .trainee/project.yaml")
 
     for operator in _suspicious_shell_operators(launcher):
         section.add("warn", f"launcher contains suspicious shell operator: {operator}")
@@ -239,7 +317,16 @@ def _check_launcher(project_root: Path, spec: ProjectSpec | None) -> DoctorSecti
         section.add("warn", "tunable params are not bounded: " + ", ".join(unbounded))
     else:
         section.add("ok", "tunable params are bounded")
+    section.add("ok", f"fixed command arguments: {_fixed_args_summary(launcher, spec)}")
     return section
+
+
+def _fixed_args_summary(launcher: str, spec: ProjectSpec) -> str:
+    rendered_tunable = TrainingExecutor()._render_cli_args(spec, spec.default_params())
+    fixed = launcher.replace("{extra_args}", "").strip()
+    if rendered_tunable and fixed.endswith(rendered_tunable):
+        fixed = fixed[: -len(rendered_tunable)].strip()
+    return fixed
 
 
 def _check_sandbox(project_root: Path, spec: ProjectSpec | None) -> DoctorSection:

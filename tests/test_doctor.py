@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import yaml
+
 from trainee.cli import init_project, main
 from trainee.doctor import _check_environment, _check_launcher, format_doctor_report, run_doctor
 from trainee.models import ProjectSpec, TunableParam
@@ -33,17 +35,17 @@ def test_init_project_creates_doctor_required_directories(tmp_path: Path) -> Non
     assert (project / ".trainee" / "logs").is_dir()
 
 
-def test_doctor_reports_invalid_project_json(tmp_path: Path) -> None:
+def test_doctor_reports_invalid_project_yaml(tmp_path: Path) -> None:
     project = tmp_path / "project"
     trainee_dir = project / ".trainee"
     (trainee_dir / "runs").mkdir(parents=True)
     (trainee_dir / "logs").mkdir()
-    (trainee_dir / "project.json").write_text("{", encoding="utf-8")
+    (trainee_dir / "project.yaml").write_text("launch: [", encoding="utf-8")
 
     report = run_doctor(project)
 
     assert report.has_failures
-    assert "project.json is invalid" in format_doctor_report(report)
+    assert "project.yaml is invalid" in format_doctor_report(report)
 
 
 def test_launcher_analysis_warns_on_unsafe_outputs_and_unbounded_params(tmp_path: Path) -> None:
@@ -160,12 +162,15 @@ def test_doctor_cli_returns_nonzero_only_for_failures(tmp_path: Path, capsys, mo
     assert main(["doctor", str(project)]) == 1
     assert "not ready" in capsys.readouterr().out
 
+    (project / "data").mkdir()
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
     init_project(project)
-    project_json_path = project / ".trainee" / "project.json"
-    payload = json.loads(project_json_path.read_text(encoding="utf-8"))
-    payload["launcher_template"] = "python train.py --output_dir .trainee/runs/latest {extra_args}"
-    project_json_path.write_text(json.dumps(payload), encoding="utf-8")
+    project_yaml_path = project / ".trainee" / "project.yaml"
+    payload = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
+    payload["launch"]["args"].append(
+        {"flag": "--output_dir", "value": ".trainee/runs/latest"}
+    )
+    project_yaml_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
     def fake_which(name: str) -> str | None:
         paths = {
@@ -180,4 +185,5 @@ def test_doctor_cli_returns_nonzero_only_for_failures(tmp_path: Path, capsys, mo
     assert main(["doctor", str(project)]) == 0
     output = capsys.readouterr().out
     assert "Trainee doctor" in output
-    assert "ready to run:" in output
+    assert "Result\n  ready" in output
+    assert "Baseline command" in output

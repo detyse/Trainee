@@ -290,6 +290,10 @@ button:disabled {
 .status-failed,
 .status-stalled,
 .status-provider-failed,
+.status-request-failed,
+.status-response-failed,
+.status-parse-failed,
+.status-validation-failed,
 .status-degraded,
 .danger {
   color: var(--danger);
@@ -350,6 +354,35 @@ pre {
   overflow: auto;
 }
 
+.agent-debug-settings {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.agent-debug-settings p {
+  margin: 0;
+}
+
+.debug-block summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.debug-block[open] summary {
+  margin-bottom: 12px;
+}
+
+.agent-trace-output {
+  max-height: 520px;
+  overflow: auto;
+}
+
 .preset-box,
 .settings-box,
 .prompt-payload {
@@ -361,6 +394,20 @@ pre {
 
 .prompt-meta {
   margin-bottom: 16px;
+}
+
+.program-editor {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.prompt-preview-header {
+  margin-top: 20px;
+  margin-bottom: 16px;
+}
+
+.prompt-preview-header .panel-kicker {
+  margin-bottom: 4px;
 }
 
 .runtime-meta {
@@ -387,6 +434,16 @@ pre {
 }
 
 .prompt-payload summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.detail-spacing {
+  margin: 14px 0;
+}
+
+details.settings-box > summary {
   cursor: pointer;
   color: var(--accent);
   font-weight: 700;

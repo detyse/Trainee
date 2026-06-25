@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from trainee.models import AgentDecision, LoopSnapshot, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
+from trainee.models import AgentDecision, AgentTrace, LoopSnapshot, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
 
 
 class ImageAnalysisLimitExceeded(RuntimeError):
@@ -69,12 +69,14 @@ class Storage:
                     wandb_run_url TEXT,
                     metrics_json TEXT NOT NULL,
                     agent_decision_json TEXT,
+                    agent_trace_json TEXT,
                     prompt_preview_json TEXT,
                     error TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
                 );
                 """
             )
+            self._ensure_column("rounds", "agent_trace_json", "TEXT")
             self._ensure_column("rounds", "prompt_preview_json", "TEXT")
             self._ensure_column("sessions", "resumed_from", "INTEGER")
             self._ensure_column("sessions", "project_spec_json", "TEXT")
@@ -257,8 +259,8 @@ class Storage:
                 INSERT INTO rounds(
                     session_id, round_index, resolved_command, param_values_json, status, start_time,
                     end_time, exit_code, log_paths_json, wandb_run_url, metrics_json, agent_decision_json,
-                    prompt_preview_json, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    agent_trace_json, prompt_preview_json, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.session_id,
@@ -273,6 +275,7 @@ class Storage:
                     record.wandb_run_url,
                     json.dumps(record.metrics),
                     json.dumps(record.agent_decision.model_dump(mode="json")) if record.agent_decision else None,
+                    json.dumps(record.agent_trace.model_dump(mode="json")) if record.agent_trace else None,
                     json.dumps(record.prompt_preview.model_dump(mode="json")) if record.prompt_preview else None,
                     record.error,
                 ),
@@ -290,7 +293,7 @@ class Storage:
                 UPDATE rounds
                 SET resolved_command = ?, param_values_json = ?, status = ?, start_time = ?, end_time = ?,
                     exit_code = ?, log_paths_json = ?, wandb_run_url = ?, metrics_json = ?, agent_decision_json = ?,
-                    prompt_preview_json = ?, error = ?
+                    agent_trace_json = ?, prompt_preview_json = ?, error = ?
                 WHERE id = ?
                 """,
                 (
@@ -304,6 +307,7 @@ class Storage:
                     record.wandb_run_url,
                     json.dumps(record.metrics),
                     json.dumps(record.agent_decision.model_dump(mode="json")) if record.agent_decision else None,
+                    json.dumps(record.agent_trace.model_dump(mode="json")) if record.agent_trace else None,
                     json.dumps(record.prompt_preview.model_dump(mode="json")) if record.prompt_preview else None,
                     record.error,
                     record.id,
@@ -322,6 +326,41 @@ class Storage:
         with self._lock:
             rows = self._connection.execute(query, params).fetchall()
         return [self._round_from_row(row) for row in rows]
+
+    def list_research_rounds(
+        self,
+        session_id: int,
+        include_resumed_ancestors: bool = True,
+    ) -> List[RoundRecord]:
+        session_ids: list[int] = []
+        current_id: Optional[int] = session_id
+        seen: set[int] = set()
+
+        while current_id is not None:
+            if current_id in seen:
+                raise ValueError(f"resume cycle detected at session {current_id}")
+            seen.add(current_id)
+            session = self.get_session(current_id)
+            if session is None:
+                raise ValueError(f"session {current_id} not found")
+            session_ids.append(current_id)
+            if not include_resumed_ancestors:
+                break
+            current_id = session.resumed_from
+
+        rounds: list[RoundRecord] = []
+        with self._lock:
+            for lineage_session_id in reversed(session_ids):
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM rounds
+                    WHERE session_id = ?
+                    ORDER BY round_index ASC, id ASC
+                    """,
+                    (lineage_session_id,),
+                ).fetchall()
+                rounds.extend(self._round_from_row(row) for row in rows)
+        return rounds
 
     def get_round(self, round_id: int) -> Optional[RoundRecord]:
         with self._lock:
@@ -365,6 +404,7 @@ class Storage:
 
     def _round_from_row(self, row: sqlite3.Row) -> RoundRecord:
         decision = json.loads(row["agent_decision_json"]) if row["agent_decision_json"] else None
+        agent_trace = json.loads(row["agent_trace_json"]) if row["agent_trace_json"] else None
         prompt_preview = json.loads(row["prompt_preview_json"]) if row["prompt_preview_json"] else None
         return RoundRecord(
             id=row["id"],
@@ -380,6 +420,7 @@ class Storage:
             wandb_run_url=row["wandb_run_url"],
             metrics=json.loads(row["metrics_json"]),
             agent_decision=AgentDecision.model_validate(decision) if decision else None,
+            agent_trace=AgentTrace.model_validate(agent_trace) if agent_trace else None,
             prompt_preview=PromptPreview.model_validate(prompt_preview) if prompt_preview else None,
             error=row["error"],
         )

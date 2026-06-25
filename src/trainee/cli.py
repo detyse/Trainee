@@ -16,9 +16,18 @@ import uvicorn
 from trainee.context_builder import ContextBuilder
 from trainee.doctor import format_doctor_report, run_doctor
 from trainee.events import EventBus
-from trainee.models import ProjectContext, ProjectSpec, PromptPreset
+from trainee.models import AgentProgramUpdate, ProjectContext, PromptPreset
+from trainee.program import DEFAULT_AGENT_PROGRAM
 from trainee.orchestrator import RuntimeService
-from trainee.providers import ProviderSettingsUpdate
+from trainee.project_config import (
+    ProjectRegistration,
+    compile_project_spec,
+    default_project_config,
+    detect_project,
+    load_project_config,
+    project_config_path,
+)
+from trainee.providers import AgentDebugSettingsUpdate, ProviderSettingsUpdate
 from trainee.settings import load_settings
 from trainee.storage import Storage
 
@@ -71,10 +80,10 @@ def _object_schema(properties: dict[str, Any], required: Sequence[str] = ()) -> 
 TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="project_register",
-        description="Register an external training project and rebuild its project context.",
+        description="Save project.yaml, register the compiled project, and rebuild its context.",
         method="POST",
         path="/api/project/register",
-        input_schema=ProjectSpec.model_json_schema(),
+        input_schema=ProjectRegistration.model_json_schema(),
     ),
     ToolDefinition(
         name="project_update_context",
@@ -82,6 +91,20 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         method="POST",
         path="/api/project/context",
         input_schema=ProjectContext.model_json_schema(),
+    ),
+    ToolDefinition(
+        name="project_get_program",
+        description="Read the fixed agent rules from the project's .trainee/program.md.",
+        method="GET",
+        path="/api/project/program",
+        input_schema=_empty_schema(),
+    ),
+    ToolDefinition(
+        name="project_update_program",
+        description="Replace the fixed agent rules in the project's .trainee/program.md.",
+        method="POST",
+        path="/api/project/program",
+        input_schema=AgentProgramUpdate.model_json_schema(),
     ),
     ToolDefinition(
         name="project_get",
@@ -103,6 +126,20 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         method="POST",
         path="/api/runtime/provider",
         input_schema=ProviderSettingsUpdate.model_json_schema(),
+    ),
+    ToolDefinition(
+        name="runtime_debug_get",
+        description="Read whether Agent Debug trace collection is enabled.",
+        method="GET",
+        path="/api/runtime/debug",
+        input_schema=_empty_schema(),
+    ),
+    ToolDefinition(
+        name="runtime_debug_update",
+        description="Enable or disable Agent Debug trace collection for future rounds.",
+        method="POST",
+        path="/api/runtime/debug",
+        input_schema=AgentDebugSettingsUpdate.model_json_schema(),
     ),
     ToolDefinition(
         name="prompt_preview",
@@ -210,7 +247,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "run":
         try:
-            security_mode = "unsafe" if args.unsafe else "guarded"
+            security_mode = "unsafe" if args.unsafe else ("guarded" if args.guarded else None)
+            if args.dry_run:
+                report = run_doctor(Path(args.project_root), security_mode=security_mode)
+                print(format_doctor_report(report), end="")
+                return 1 if report.has_failures else 0
             result = asyncio.run(run_project(Path(args.project_root), security_mode=security_mode))
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -335,23 +376,19 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
     (trainee_dir / "runs").mkdir(parents=True, exist_ok=True)
     (trainee_dir / "logs").mkdir(parents=True, exist_ok=True)
 
-    spec = ProjectSpec(
-        project_root=str(project_root),
-        working_dir=str(project_root),
-        launcher_template=_default_launcher_template(project_root),
-        log_paths=[".trainee/logs/**/*.log", ".trainee/runs/**/*.log"],
-        signal_sources=[
-            {"type": "stdout"},
-            {"type": "log_file_mtime", "paths": [".trainee/logs/**/*.log", ".trainee/runs/**/*.log"]},
-        ],
-    )
+    discovery = detect_project(project_root)
+    generated_config = default_project_config(project_root, discovery)
+    config_path = project_config_path(project_root)
+    config = load_project_config(project_root) if config_path.is_file() and not force else generated_config
+    spec = compile_project_spec(project_root, config)
     context = ContextBuilder().build(spec)
     files_read = _launch_read_targets(project_root)
 
     outputs = {
-        trainee_dir / "project.json": json.dumps(spec.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+        config_path: _render_project_yaml(generated_config),
         trainee_dir / "context.md": _render_context_markdown(context),
-        trainee_dir / "README.md": _render_launch_readme(project_root),
+        trainee_dir / "program.md": DEFAULT_AGENT_PROGRAM,
+        trainee_dir / "README.md": _render_launch_readme(project_root, discovery),
     }
     already_initialized = all(path.exists() for path in outputs)
     written: list[Path] = []
@@ -371,6 +408,7 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
         "files_skipped": skipped,
         "already_initialized": already_initialized,
         "launcher_template": spec.launcher_template,
+        "discovery": discovery,
         "warnings": context.warnings,
     }
 
@@ -379,16 +417,12 @@ def launch_project(project_root: Path, force: bool = False) -> dict[str, Any]:
     return init_project(project_root, force=force)
 
 
-async def run_project(project_root: Path, security_mode: str = "guarded") -> dict[str, Any]:
+async def run_project(project_root: Path, security_mode: str | None = None) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
-    spec_path = project_root / ".trainee" / "project.json"
-    if not spec_path.is_file():
-        raise ValueError(f"project config not found: {spec_path}; run `trainee init` first")
-
-    payload = json.loads(spec_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"{spec_path} must contain a JSON object")
-    spec = ProjectSpec.model_validate(payload).model_copy(update={"security_mode": security_mode})
+    report = run_doctor(project_root, security_mode=security_mode)
+    if report.has_failures:
+        raise ValueError("preflight failed:\n" + format_doctor_report(report))
+    spec = compile_project_spec(project_root, load_project_config(project_root), security_mode=security_mode)
 
     settings = load_settings(repo_root=project_root, project_root=project_root)
     storage = Storage(settings.database_path)
@@ -439,11 +473,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--force", action="store_true", help="Overwrite existing files under .trainee.")
     init_parser.set_defaults(command="init")
 
-    run_parser = subparsers.add_parser("run", help="Run the training loop from .trainee/project.json.")
+    run_parser = subparsers.add_parser("run", help="Run the training loop from .trainee/project.yaml.")
     run_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     security_group = run_parser.add_mutually_exclusive_group()
     security_group.add_argument("--guarded", action="store_true", help="Run with the default bubblewrap sandbox.")
     security_group.add_argument("--unsafe", action="store_true", help="Run without bubblewrap isolation.")
+    run_parser.add_argument("--dry-run", action="store_true", help="Validate project.yaml and print the baseline command without starting a session.")
     run_parser.set_defaults(command="run")
 
     doctor_parser = subparsers.add_parser("doctor", help="Check whether a training project is ready for Trainee.")
@@ -520,9 +555,14 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
         print(f"- Wrote: {Path(path).relative_to(project_root)}")
     for path in result["files_skipped"]:
         print(f"- Kept: {Path(path).relative_to(project_root)}")
-    launcher = result["launcher_template"] or "set launcher_template in .trainee/project.json"
+    launcher = result["launcher_template"] or "set launch.command in .trainee/project.yaml"
     print(f"- Launcher: {launcher}")
-    print("- Next: review .trainee/context.md and .trainee/project.json, then run `trainee run`")
+    discovery = result["discovery"]
+    if discovery.entrypoints:
+        print(f"- Entrypoints: {', '.join(discovery.entrypoints)}")
+    if discovery.data_dirs:
+        print(f"- Data candidates: {', '.join(discovery.data_dirs)}")
+    print("- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`")
     for warning in result["warnings"]:
         print(f"- Warning: {warning}")
 
@@ -538,13 +578,6 @@ def _print_run_result(result: Mapping[str, Any]) -> None:
     print(f"- Status: {result['status']}")
     if result["message"]:
         print(f"- Message: {result['message']}")
-
-
-def _default_launcher_template(project_root: Path) -> str:
-    for relative_path in ("train.py", "main.py", "run.py"):
-        if (project_root / relative_path).is_file():
-            return f"python {{project_root}}/{relative_path} {{extra_args}}"
-    return ""
 
 
 def _launch_read_targets(project_root: Path) -> list[Path]:
@@ -580,26 +613,50 @@ def _render_context_markdown(context: ProjectContext) -> str:
     return "\n".join(lines)
 
 
-def _render_launch_readme(project_root: Path) -> str:
+def _render_project_yaml(config: Any) -> str:
+    import yaml
+
+    return yaml.safe_dump(
+        config.model_dump(mode="json", exclude_none=True),
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+
+
+def _render_launch_readme(project_root: Path, discovery: Any) -> str:
+    entrypoints = ", ".join(f"`{item}`" for item in discovery.entrypoints) or "none detected"
+    data_dirs = ", ".join(f"`{item}`" for item in discovery.data_dirs) or "none detected"
+    config_files = ", ".join(f"`{item}`" for item in discovery.config_files) or "none detected"
+    limit_flags = ", ".join(f"`{item.flag} {item.value}`" for item in discovery.limit_flags) or "none detected"
     return "\n".join(
         [
             "# Trainee Project Files",
             "",
             f"Project root: `{project_root}`",
             "",
-            "- `project.json`: editable project registration draft.",
+            "- `project.yaml`: the only user-facing run configuration.",
             "- `context.md`: generated project understanding for review.",
+            "- `program.md`: fixed agent rules included in every decision system prompt.",
             "- `logs/`, `runs/`, and `artifacts/`: writable runtime outputs for guarded runs.",
+            "",
+            "Detected candidates:",
+            "",
+            f"- Environment: `{discovery.environment}`" + (f" (`{discovery.env_name}`)" if discovery.env_name else ""),
+            f"- Entrypoints: {entrypoints}",
+            f"- Data directories: {data_dirs}",
+            f"- Config files: {config_files}",
+            f"- Training-limit arguments: {limit_flags}",
             "",
             "Recommended workflow:",
             "",
-            "1. Review and edit `context.md` so Trainee has the right project goal, constraints, and evaluation criteria.",
-            "2. Review and edit `project.json`, especially `launcher_template`, `tunable_params`, and `metric_specs`.",
-            "3. Run `trainee doctor` to check the project setup.",
-            "4. Run `trainee run` after the draft looks correct.",
+            "1. Edit `project.yaml`: confirm data, environment, command, fixed limits, tunable parameters, and metrics.",
+            "2. Review `program.md` and `context.md` for project-specific rules and goals.",
+            "3. Run `trainee doctor` or `trainee run --dry-run` and inspect the baseline command.",
+            "4. Run `trainee run`.",
             "",
-            "Launcher template variables: `{project_root}`, `{working_dir}`, `{trainee_dir}`, `{session_id}`, `{round_index}`, `{session_dir}`, `{round_dir}`, `{config_path}`, `{extra_args}`.",
-            "`{session_dir}` and `{round_dir}` point inside `.trainee/runs/`; `{config_path}` defaults to `{round_dir}/config.yaml`.",
+            "`run.fixed_args` are constant in every round. Only `tuning.params` may be changed by the agent.",
+            "Use `advanced.shell_command` only when the structured launcher cannot express the command.",
             "Guarded runs make the host filesystem read-only and keep writes inside this `.trainee/` directory.",
             "",
         ]

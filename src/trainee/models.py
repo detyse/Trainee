@@ -216,6 +216,16 @@ class ProjectContext(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class AgentProgram(BaseModel):
+    content: str = ""
+    path: str = ""
+    exists: bool = False
+
+
+class AgentProgramUpdate(BaseModel):
+    content: str = ""
+
+
 class PromptPreview(BaseModel):
     provider: str = "none"
     model: str = ""
@@ -223,6 +233,8 @@ class PromptPreview(BaseModel):
     system_prompt: str = ""
     user_prompt: str = ""
     payload: Dict[str, Any] = Field(default_factory=dict)
+    static_context_json: Dict[str, Any] = Field(default_factory=dict)
+    dynamic_state_json: Dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -249,6 +261,33 @@ class AgentDecision(BaseModel):
     next_params: Dict[str, Any] = Field(default_factory=dict)
     reason: str
     focus_metrics: List[str] = Field(default_factory=list)
+    hypothesis: str = ""
+    change_summary: str = ""
+    latest_round_judgement: str = "inconclusive"
+    compare_to_baseline: str = ""
+    compare_to_best: str = ""
+    expected_effect: str = ""
+    avoid_repeating: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class AgentTrace(BaseModel):
+    provider: str
+    model: Optional[str] = None
+    status: str
+    http_status: Optional[int] = None
+    request_id: Optional[str] = None
+    raw_response_body: Optional[str] = None
+    error_body: Optional[str] = None
+    raw_output: Optional[str] = None
+    extracted_json: Optional[Dict[str, Any]] = None
+    parse_error: Optional[str] = None
+    validation_error: Optional[str] = None
+    provider_error: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
+    finish_reason: Optional[str] = None
+    fallback_reason: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now)
 
 
 class RunSession(BaseModel):
@@ -279,6 +318,7 @@ class RoundRecord(BaseModel):
     wandb_run_url: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
     agent_decision: Optional[AgentDecision] = None
+    agent_trace: Optional[AgentTrace] = None
     prompt_preview: Optional[PromptPreview] = None
     error: Optional[str] = None
 

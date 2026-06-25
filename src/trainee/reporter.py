@@ -3,29 +3,40 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-from trainee.models import MetricSpec, RoundRecord, RunSession
+from trainee.ledger import LedgerExporter
+from trainee.models import ProjectSpec, RoundRecord, RunSession
+from trainee.research_state import ResearchRoundState, ResearchStateBuilder
 from trainee.storage import Storage
 
 
 class ReportGenerator:
-    def __init__(self, storage: Storage):
+    def __init__(
+        self,
+        storage: Storage,
+        research_state_builder: Optional[ResearchStateBuilder] = None,
+        ledger_exporter: Optional[LedgerExporter] = None,
+    ):
         self.storage = storage
+        self.research_state_builder = research_state_builder or ResearchStateBuilder()
+        self.ledger_exporter = ledger_exporter or LedgerExporter(self.research_state_builder)
 
     def generate_session_report(self, session_id: int) -> str:
         session = self.storage.get_session(session_id)
         if session is None:
             raise ValueError(f"session {session_id} not found")
-        rounds = list(reversed(self.storage.list_rounds(session_id)))
-        metric = self._primary_metric(session, rounds)
-        best_round = self._best_round(rounds, metric)
+        if session.project_spec is None:
+            raise ValueError(f"session {session_id} has no project spec")
+        rounds = self.storage.list_research_rounds(session_id)
+        state = self.research_state_builder.build(session.project_spec, rounds)
+        ledger_rows = self.ledger_exporter.build_rows(session.project_spec, rounds, state)
 
         sections = [
             f"# Trainee Session Report #{session_id}",
-            self._session_summary(session, rounds, metric, best_round),
+            self._session_summary(session, rounds, state.best_so_far_round, state.primary_metric_name),
             self._params_table(rounds),
-            self._metrics_table(rounds, metric, best_round),
+            self._metrics_table(rounds, ledger_rows, state.primary_metric_name, state.best_so_far_round),
             self._decision_log(rounds),
-            self._final_conclusion(metric, best_round),
+            self._final_conclusion(session.project_spec, state.primary_metric_name, state.best_so_far_round),
         ]
         return "\n\n".join(section for section in sections if section).rstrip() + "\n"
 
@@ -40,8 +51,8 @@ class ReportGenerator:
         self,
         session: RunSession,
         rounds: list[RoundRecord],
-        metric: Optional[MetricSpec],
-        best_round: Optional[RoundRecord],
+        best_round: Optional[ResearchRoundState],
+        metric_name: str,
     ) -> str:
         spec = session.project_spec
         rows = [
@@ -53,8 +64,13 @@ class ReportGenerator:
             ("Project Root", spec.project_root if spec else ""),
             ("Resumed From", str(session.resumed_from or "")),
         ]
-        if metric and best_round:
-            rows.append(("Best Metric", f"{metric.name}={best_round.metrics.get(metric.name)} at round {best_round.round_index}"))
+        if metric_name and best_round is not None:
+            rows.append(
+                (
+                    "Best Metric",
+                    f"{metric_name}={best_round.primary_metric_value} at round {best_round.round_index}",
+                )
+            )
         return "## Summary\n\n" + "\n".join(f"- **{name}**: {value}" for name, value in rows)
 
     def _params_table(self, rounds: list[RoundRecord]) -> str:
@@ -78,25 +94,25 @@ class ReportGenerator:
     def _metrics_table(
         self,
         rounds: list[RoundRecord],
-        primary_metric: Optional[MetricSpec],
-        best_round: Optional[RoundRecord],
+        ledger_rows: list[dict[str, Any]],
+        metric_name: str,
+        best_round: Optional[ResearchRoundState],
     ) -> str:
         metric_names = sorted({name for item in rounds for name in item.metrics})
         if not rounds or not metric_names:
             return "## Metric Trend\n\nNo metrics were recorded."
         header = ["Round", "Status", *metric_names, "Best"]
         lines = [self._markdown_row(header), self._markdown_separator(len(header))]
-        for item in rounds:
-            marker = ""
-            if primary_metric and best_round and item.id == best_round.id:
-                marker = f"best {primary_metric.name}"
+        best_id = best_round.round_id if best_round else None
+        for item, ledger_row in zip(rounds, ledger_rows):
+            marker = f"best {metric_name}" if metric_name and item.id == best_id else ""
             lines.append(
                 self._markdown_row(
                     [
                         item.round_index,
                         item.status,
                         *[item.metrics.get(name, "") for name in metric_names],
-                        marker,
+                        marker or ledger_row["best_so_far"],
                     ]
                 )
             )
@@ -106,43 +122,41 @@ class ReportGenerator:
         rows = [item for item in rounds if item.agent_decision is not None]
         if not rows:
             return "## Decision Log\n\nNo agent decisions were recorded."
-        lines = [self._markdown_row(["Round", "Action", "Reason"]), self._markdown_separator(3)]
+        lines = [
+            self._markdown_row(["Round", "Action", "Hypothesis", "Change", "Reason"]),
+            self._markdown_separator(5),
+        ]
         for item in rows:
             decision = item.agent_decision
             assert decision is not None
-            lines.append(self._markdown_row([item.round_index, decision.action, decision.reason]))
+            lines.append(
+                self._markdown_row(
+                    [
+                        item.round_index,
+                        decision.action,
+                        decision.hypothesis,
+                        decision.change_summary,
+                        decision.reason,
+                    ]
+                )
+            )
         return "## Decision Log\n\n" + "\n".join(lines)
 
-    def _final_conclusion(self, metric: Optional[MetricSpec], best_round: Optional[RoundRecord]) -> str:
-        if metric is None or best_round is None:
+    def _final_conclusion(
+        self,
+        spec: ProjectSpec,
+        metric_name: str,
+        best_round: Optional[ResearchRoundState],
+    ) -> str:
+        if not metric_name or best_round is None:
             return "## Final Conclusion\n\nNo best round could be selected because no primary metric was available."
         params = ", ".join(f"{name}={value}" for name, value in sorted(best_round.param_values.items()))
-        value = best_round.metrics.get(metric.name)
         return (
             "## Final Conclusion\n\n"
-            f"Best observed round: **{best_round.round_index}** with **{metric.name}={value}**. "
+            f"Best observed round: **{best_round.round_index}** with "
+            f"**{metric_name}={best_round.primary_metric_value}**. "
             f"Recommended parameter set: `{params}`."
         )
-
-    def _primary_metric(self, session: RunSession, rounds: list[RoundRecord]) -> Optional[MetricSpec]:
-        if session.project_spec and session.project_spec.metric_specs:
-            for metric in session.project_spec.metric_specs:
-                if any(metric.name in item.metrics for item in rounds):
-                    return metric
-            return session.project_spec.metric_specs[0]
-        names = sorted({name for item in rounds for name in item.metrics})
-        if not names:
-            return None
-        return MetricSpec(name=names[0], key_or_pattern=names[0], goal="min", required=False)
-
-    def _best_round(self, rounds: list[RoundRecord], metric: Optional[MetricSpec]) -> Optional[RoundRecord]:
-        if metric is None:
-            return None
-        candidates = [item for item in rounds if metric.name in item.metrics]
-        if not candidates:
-            return None
-        reverse = metric.goal == "max"
-        return sorted(candidates, key=lambda item: float(item.metrics[metric.name]), reverse=reverse)[0]
 
     def _markdown_row(self, values: list[Any]) -> str:
         return "| " + " | ".join(self._cell(value) for value in values) + " |"

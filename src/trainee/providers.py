@@ -49,6 +49,10 @@ class ProviderSettingsUpdate(BaseModel):
     anthropic: AnthropicProviderUpdate = Field(default_factory=AnthropicProviderUpdate)
 
 
+class AgentDebugSettingsUpdate(BaseModel):
+    agent_debug_enabled: bool = False
+
+
 def normalize_provider(provider: str) -> LLMProvider:
     normalized = provider.strip().lower()
     if normalized not in PROVIDER_NAMES:
@@ -80,6 +84,7 @@ def provider_settings_payload(settings: Settings) -> Dict[str, Any]:
     return {
         "llm_provider": settings.llm_provider,
         "llm_timeout_sec": settings.llm_timeout_sec,
+        "agent_debug_enabled": settings.agent_debug_enabled,
         "active_model": active_model(settings),
         "openai_base_url": settings.openai_base_url,
         "openai_model": settings.openai_model,

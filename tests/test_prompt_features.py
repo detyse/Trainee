@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
-from trainee.models import RunSession
+import yaml
+
+from trainee.models import AgentTrace, RoundRecord, RunSession
 
 REGISTER_PAYLOAD_TEMPLATE = {
     "security_mode": "unsafe",
@@ -29,21 +31,69 @@ REGISTER_PAYLOAD_TEMPLATE = {
 
 
 def _project_form(payload: dict[str, object]) -> dict[str, object]:
+    shell_command = str(payload["launcher_template"]).replace("{extra_args}", "").strip()
+    advanced = {
+        "heartbeat_interval_sec": payload.get("heartbeat_interval_sec", 5.0),
+        "stall_timeout_sec": payload.get("stall_timeout_sec", 120.0),
+        "kill_on_stall": payload.get("kill_on_stall", True),
+        "signal_sources": payload.get("signal_sources", []),
+        "log_paths": payload.get("log_paths", []),
+        "shell_command": shell_command,
+    }
     return {
         "project_root": payload["project_root"],
         "working_dir": payload["working_dir"],
-        "launcher_template": payload["launcher_template"],
+        "launch_environment": "system",
+        "launch_env_name": "",
+        "launch_command": "python train.py",
+        "launch_args_lines": "",
+        "fixed_args_lines": "",
+        "data_lines": "\n".join(str(path) for path in payload.get("data_paths", [])),
+        "advanced_yaml": yaml.safe_dump(advanced, sort_keys=False),
         "security_mode": payload.get("security_mode", "guarded"),
-        "data_paths_json": json.dumps(payload.get("data_paths", [])),
-        "log_paths_json": json.dumps(payload.get("log_paths", [])),
         "wandb_enabled": "on" if payload.get("wandb_enabled") else "",
-        "heartbeat_interval_sec": str(payload.get("heartbeat_interval_sec", 5.0)),
-        "stall_timeout_sec": str(payload.get("stall_timeout_sec", 120.0)),
+        "timeout_minutes": "",
         "max_rounds": str(payload.get("max_rounds", 3)),
-        "tunable_params_json": json.dumps(payload.get("tunable_params", [])),
-        "metric_specs_json": json.dumps(payload.get("metric_specs", [])),
+        "tunable_params_yaml": yaml.safe_dump(payload.get("tunable_params", []), sort_keys=False),
+        "metric_specs_yaml": yaml.safe_dump(payload.get("metric_specs", []), sort_keys=False),
         "metric_prompt": payload.get("metric_prompt", ""),
         "tuning_prompt": payload.get("tuning_prompt", ""),
+    }
+
+
+def _registration(payload: dict[str, object]) -> dict[str, object]:
+    shell_command = str(payload["launcher_template"]).replace("{extra_args}", "").strip()
+    return {
+        "project_root": payload["project_root"],
+        "version": 1,
+        "data": [{"path": path} for path in payload.get("data_paths", [])],
+        "launch": {
+            "environment": "system",
+            "command": ["python", "train.py"],
+            "args": [],
+        },
+        "run": {
+            "max_rounds": payload.get("max_rounds", 3),
+            "timeout_minutes": None,
+            "fixed_args": [],
+        },
+        "tuning": {"params": payload.get("tunable_params", [])},
+        "metrics": {
+            "specs": payload.get("metric_specs", []),
+            "prompt": payload.get("metric_prompt", ""),
+        },
+        "advanced": {
+            "security_mode": payload.get("security_mode", "guarded"),
+            "working_dir": payload.get("working_dir"),
+            "heartbeat_interval_sec": payload.get("heartbeat_interval_sec", 5.0),
+            "stall_timeout_sec": payload.get("stall_timeout_sec", 120.0),
+            "kill_on_stall": payload.get("kill_on_stall", True),
+            "signal_sources": payload.get("signal_sources", []),
+            "log_paths": payload.get("log_paths", []),
+            "wandb_enabled": payload.get("wandb_enabled", False),
+            "tuning_prompt": payload.get("tuning_prompt", ""),
+            "shell_command": shell_command,
+        },
     }
 
 
@@ -59,7 +109,7 @@ def test_prompt_preview_api_shows_model_request(runtime_env):
         "log_paths": [str(external_project / "logs" / "*.log")],
     }
 
-    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
 
     response = client.get("/api/prompt-preview")
 
@@ -69,11 +119,46 @@ def test_prompt_preview_api_shows_model_request(runtime_env):
     assert payload["label"] == "Next decision preview based on saved project state"
     assert preview["status"] == "preview"
     assert preview["provider"] == "none"
+    assert preview["system_prompt"].startswith("# Trainee Agent Rules")
     assert "JSON only" in preview["system_prompt"]
     assert preview["user_prompt"].startswith("<STATIC_CONTEXT>\n")
     assert "\n</STATIC_CONTEXT>\n\n<DYNAMIC_ROUND_STATE>\n" in preview["user_prompt"]
     assert '"tuning_prompt":"Lower lr if loss gets worse."' in preview["user_prompt"]
     assert preview["payload"]["user"] == preview["user_prompt"]
+    assert preview["static_context_json"]["tuning_prompt"] == "Lower lr if loss gets worse."
+    assert preview["dynamic_state_json"]["current_params"] == {"epochs": 2, "lr": 0.2}
+
+
+def test_agent_program_ui_updates_file_and_prompt_preview(runtime_env):
+    client = runtime_env["client"]
+    external_project = runtime_env["external_project"]
+    python = runtime_env["python"]
+    register_payload = REGISTER_PAYLOAD_TEMPLATE | {
+        "project_root": str(external_project),
+        "working_dir": str(external_project),
+        "launcher_template": f"{python} {{project_root}}/train.py --log-file {{project_root}}/logs/program.log {{extra_args}}",
+    }
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
+
+    custom_rules = "# Project Rules\n\n- Prefer smaller learning-rate changes."
+    response = client.post(
+        "/ui/project/program",
+        data={"content": custom_rules},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    program_path = external_project / ".trainee" / "program.md"
+    assert program_path.read_text(encoding="utf-8") == custom_rules + "\n"
+    program = client.get("/api/project/program").json()
+    assert program == {
+        "content": custom_rules + "\n",
+        "path": str(program_path),
+        "exists": True,
+    }
+    preview = client.get("/api/prompt-preview").json()["prompt_preview"]
+    assert preview["system_prompt"].startswith(custom_rules)
+    assert "Runtime response contract: Respond with JSON only." in preview["system_prompt"]
 
 
 def test_runtime_provider_settings_save_to_config_json(runtime_env):
@@ -142,6 +227,70 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
     assert client.get("/api/health").json()["llm_provider"] == "moonshot"
 
 
+def test_agent_debug_setting_defaults_off_and_persists(runtime_env):
+    client = runtime_env["client"]
+    config_path = runtime_env["config_path"]
+
+    assert client.get("/api/runtime/debug").json() == {"agent_debug_enabled": False}
+
+    response = client.post("/api/runtime/debug", json={"agent_debug_enabled": True})
+
+    assert response.status_code == 200
+    assert response.json() == {"agent_debug_enabled": True}
+    assert json.loads(config_path.read_text(encoding="utf-8"))["agent_debug_enabled"] is True
+    assert client.get("/api/runtime/provider").json()["agent_debug_enabled"] is True
+
+    ui_response = client.post(
+        "/ui/runtime/debug",
+        data={},
+        headers={"HX-Request": "true"},
+    )
+    assert ui_response.status_code == 200
+    assert client.get("/api/runtime/debug").json() == {"agent_debug_enabled": False}
+
+
+def test_agent_debug_setting_cannot_change_while_loop_is_running(runtime_env, monkeypatch):
+    client = runtime_env["client"]
+    runtime = client.app.state.runtime
+    monkeypatch.setattr(runtime, "loop_is_running", lambda: True)
+
+    response = client.post("/api/runtime/debug", json={"agent_debug_enabled": True})
+
+    assert response.status_code == 409
+    assert "stop the loop" in response.json()["detail"]
+
+
+def test_run_detail_renders_saved_agent_trace(runtime_env):
+    client = runtime_env["client"]
+    runtime = client.app.state.runtime
+    session = runtime.storage.create_session(RunSession(status="stopped"))
+    record = runtime.storage.create_round(
+        RoundRecord(
+            session_id=session.id,
+            round_index=1,
+            resolved_command="python train.py",
+            status="completed",
+            agent_trace=AgentTrace(
+                provider="openai",
+                model="gpt-test",
+                status="parse_failed",
+                raw_output="<unsafe>&raw",
+                parse_error="no JSON object found",
+                fallback_reason="no JSON object found",
+            ),
+        )
+    )
+
+    api_payload = client.get(f"/api/runs/{record.id}").json()
+    detail = client.get(f"/fragments/run-detail?run_id={record.id}")
+
+    assert api_payload["agent_trace"]["status"] == "parse_failed"
+    assert detail.status_code == 200
+    assert "Agent Debug" in detail.text
+    assert "parse_failed" in detail.text
+    assert "&lt;unsafe&gt;&amp;raw" in detail.text
+
+
 def test_llm_image_probe_is_limited_per_session(runtime_env):
     client = runtime_env["client"]
     runtime = client.app.state.runtime
@@ -207,7 +356,7 @@ def test_prompt_presets_are_project_scoped_and_apply_to_project(runtime_env):
         "data_paths": [str(external_project / "data")],
         "log_paths": [str(external_project / "logs" / "*.log")],
     }
-    assert client.post("/api/project/register", json=register_payload).status_code == 200
+    assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
 
     saved = client.post(
         "/api/prompt-presets",

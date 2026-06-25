@@ -1,15 +1,39 @@
-<section id="prompt-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+<section id="prompt-section" class="panel panel-full" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
   <div class="panel-header">
     <div>
-      <p class="panel-kicker">Prompt Preview</p>
-      <h2>Model Request</h2>
+      <p class="panel-kicker">Agent Program</p>
+      <h2>Rules And Model Request</h2>
     </div>
     {% if prompt_preview %}
       <span class="status-pill status-{{ prompt_preview.status|replace('_', '-') }}">{{ prompt_preview.status }}</span>
     {% endif %}
   </div>
 
+  <form
+    class="stacked-form program-editor"
+    method="post"
+    action="/ui/project/program"
+    hx-post="/ui/project/program"
+    hx-target="#prompt-section"
+    hx-swap="outerHTML"
+  >
+    <label>
+      <span>Fixed agent rules</span>
+      <textarea name="content" rows="12">{{ agent_program.content }}</textarea>
+    </label>
+    {% if agent_program.path %}
+      <span class="muted">{{ agent_program.path }}</span>
+    {% endif %}
+    <div class="actions">
+      <button class="primary" type="submit">Save Agent Rules</button>
+    </div>
+  </form>
+
   {% if prompt_preview %}
+    <div class="prompt-preview-header">
+      <p class="panel-kicker">Prompt Preview</p>
+      <h3>Model Request</h3>
+    </div>
     <div class="prompt-meta">
       <div>
         <span class="label">Source</span>
@@ -37,6 +61,14 @@
       <span class="label">User prompt</span>
       <pre class="prompt-pre tall">{{ prompt_preview.user_prompt }}</pre>
     </div>
+    <details class="prompt-payload">
+      <summary>Static context JSON</summary>
+      <pre class="prompt-pre tall">{{ prompt_static_context_json }}</pre>
+    </details>
+    <details class="prompt-payload">
+      <summary>Dynamic research state JSON</summary>
+      <pre class="prompt-pre tall">{{ prompt_dynamic_state_json }}</pre>
+    </details>
     <details class="prompt-payload">
       <summary>Provider payload JSON</summary>
       <pre class="prompt-pre tall">{{ prompt_payload_json }}</pre>

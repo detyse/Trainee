@@ -37,6 +37,7 @@ class Settings:
     moonshot_base_url: str = DEFAULT_MOONSHOT_BASE_URL
     moonshot_model: str = DEFAULT_MOONSHOT_MODEL
     max_image_analyses_per_session: int = DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION
+    agent_debug_enabled: bool = False
 
     @property
     def data_dir(self) -> Path:
@@ -97,6 +98,7 @@ def load_settings(
                 str(DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION),
             )
         ),
+        agent_debug_enabled=_config_bool(config_payload, "agent_debug_enabled", False),
     )
 
 
@@ -104,7 +106,7 @@ def save_provider_config(config_path: Path, payload: Dict[str, Any]) -> None:
     config = _read_config(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for key in ("llm_provider", "llm_timeout_sec"):
+    for key in ("llm_provider", "llm_timeout_sec", "agent_debug_enabled"):
         if key in payload:
             config[key] = payload[key]
 
@@ -204,6 +206,19 @@ def _provider_config_value(config_payload: Dict[str, Any], provider: str, key: s
     if not isinstance(provider_payload, dict):
         return None
     return provider_payload.get(key)
+
+
+def _config_bool(config_payload: Dict[str, Any], key: str, default: bool) -> bool:
+    value = config_payload.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    return bool(value)
 
 
 def _resolve_path(raw: str, repo_root: Path) -> Path:

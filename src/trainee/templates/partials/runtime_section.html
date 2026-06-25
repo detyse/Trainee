@@ -24,7 +24,35 @@
       <span class="label">Database</span>
       <strong>{{ "ok" if health.db_ok else "failed" }}</strong>
     </div>
+    <div>
+      <span class="label">Agent Debug</span>
+      <strong>{{ "enabled" if runtime_settings.agent_debug_enabled else "disabled" }}</strong>
+    </div>
   </div>
+
+  <form
+    class="settings-box agent-debug-settings"
+    method="post"
+    action="/ui/runtime/debug"
+    hx-post="/ui/runtime/debug"
+    hx-target="#runtime-section"
+    hx-swap="outerHTML"
+  >
+    <div>
+      <p class="panel-kicker">Agent Debug Trace</p>
+      <p class="muted">Store complete provider responses, parsing errors, validation errors, and heuristic fallback reasons for future rounds.</p>
+    </div>
+    <label class="checkbox-row">
+      <input
+        type="checkbox"
+        name="agent_debug_enabled"
+        {% if runtime_settings.agent_debug_enabled %}checked{% endif %}
+        {% if runtime_settings.loop_running %}disabled{% endif %}
+      />
+      <span>Enable Agent Debug</span>
+    </label>
+    <button class="secondary" type="submit" {% if runtime_settings.loop_running %}disabled{% endif %}>Save Debug Setting</button>
+  </form>
 
   <form
     class="stacked-form"
@@ -151,7 +179,7 @@
     </div>
 
     <div class="actions">
-      <button class="primary" type="submit" {% if loop.status in ["running", "running_round", "stopping"] %}disabled{% endif %}>Save Provider Settings</button>
+      <button class="primary" type="submit" {% if runtime_settings.loop_running %}disabled{% endif %}>Save Provider Settings</button>
       <button class="secondary" type="button" onclick="window.runHealthCheck && window.runHealthCheck()">Run Health Check</button>
     </div>
   </form>

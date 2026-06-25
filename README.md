@@ -1,10 +1,12 @@
 # Trainee
 
+保守的自动训练 agent
+
 Trainee 是一个面向训练自动化的 agent runtime。它不承载训练代码本身，而是接入外部训练项目与外部训练环境，围绕“读上下文 -> 发起训练 -> 监控 heartbeat -> 解析结果 -> 决定下一轮参数 -> 自动继续或停止”这条闭环，提供一个最小可用的 runtime 和控制台。
 
 ## 能力范围
 
-- 注册一个本机外部训练项目，并保存项目根目录、工作目录、启动命令模板、数据路径、日志路径、可调参数和指标规则。
+- 注册一个本机外部训练项目，并用 `.trainee/project.yaml` 保存数据、环境、固定运行预算、可调参数和指标规则。
 - 自动扫描外部项目，生成 `ProjectContext`，把“项目是什么、数据在哪、训练入口在哪、参数怎么调、结果怎么看”固化进上下文。
 - 使用显式 launcher 执行训练，例如 `conda run ... python train.py ...` 或 `/path/to/train.sh ...`。
 - 默认用 bubblewrap 进行 guarded run：宿主文件系统只读，只有项目内 `.trainee/` 可写。
@@ -14,39 +16,34 @@ Trainee 是一个面向训练自动化的 agent runtime。它不承载训练代�
 
 ## 快速开始
 
-1. 安装依赖：
+1. agent 安装：
 
 ```bash
-python3 -m pip install -e ".[dev]"
+cd /path/to/trainee
+uv tool install -e .
 ```
 
-2. 启动服务：
+2. 在训练项目中初始化：
 
 ```bash
-python3 main.py
+cd /path/to/training-project
+trainee init
 ```
 
-3. 打开 `http://127.0.0.1:8000`
-
-4. 填写外部训练项目配置。`launcher_template` 可以直接写完整命令，例如：
+3. 编辑 `.trainee/project.yaml`，然后检查最终 baseline 命令：
 
 ```bash
-conda run -n trainer python {project_root}/train.py --config {project_root}/configs/base.yaml {extra_args}
+trainee doctor
+trainee run --dry-run
 ```
 
-支持的模板变量：
+4. 开始运行：
 
-- `{project_root}`
-- `{working_dir}`
-- `{trainee_dir}`
-- `{session_id}`
-- `{round_index}`
-- `{session_dir}`
-- `{round_dir}`
-- `{config_path}`
-- `{extra_args}`
+```bash
+trainee run
+```
 
-`{extra_args}` 由 runtime 根据 `tunable_params` 自动拼成 CLI 参数。agent 不会自由生成新的 shell 片段，只能覆盖白名单参数。
+如需网页配置和运行监控，执行 `trainee webui` 并打开 `http://127.0.0.1:8000`。
 
 ## 全局 CLI 安装
 
@@ -99,24 +96,26 @@ Trainee init
 - Project: /home/user/project/toymodel
 - Read: README.md
 - Read: train.py
-- Wrote: .trainee/project.json
+- Wrote: .trainee/project.yaml
 - Wrote: .trainee/context.md
+- Wrote: .trainee/program.md
 - Wrote: .trainee/README.md
-- Launcher: python {project_root}/train.py {extra_args}
-- Next: review .trainee/context.md and .trainee/project.json, then run `trainee run`
+- Launcher: python train.py {extra_args}
+- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`
 ```
 
 项目内生成的 `.trainee/` 用来保存这个项目的初始化草稿和上下文说明：
 
-- `.trainee/project.json`: 可编辑的项目注册草稿。
+- `.trainee/project.yaml`: 唯一面向用户的运行配置。
 - `.trainee/context.md`: Trainee 读取项目代码后生成的项目理解。
+- `.trainee/program.md`: 每轮 decision 都会使用的固定 agent rules，可直接编辑，也可在 Web UI 的 Prompt 页修改。
 - `.trainee/README.md`: 本目录文件说明。
 
 推荐工作流：
 
-1. 先检查和修改 `.trainee/context.md`，补充项目目标、限制条件和评价标准。
-2. 再检查和修改 `.trainee/project.json`，尤其是 `launcher_template`、`tunable_params` 和 `metric_specs`。
-3. 运行 `trainee doctor` 检查项目配置。
+1. 编辑 `.trainee/project.yaml`，确认数据、环境、训练命令、固定限制、可调参数和指标。
+2. 检查 `.trainee/program.md` 与 `.trainee/context.md`，补充 agent 规则和项目目标。
+3. 运行 `trainee doctor` 或 `trainee run --dry-run`，检查完整 baseline 命令。
 4. 确认无误后运行 `trainee run`。
 
 如果文件已存在，`trainee init` 默认保留旧文件；需要重写时使用：
@@ -125,17 +124,7 @@ Trainee init
 trainee init --force
 ```
 
-生成的 `project.json` 默认 `security_mode` 为 `guarded`，默认用 stdout 和 `.trainee/logs/**/*.log`、`.trainee/runs/**/*.log` 作为 heartbeat signal。Launcher 模板可用变量：
-
-- `{project_root}`
-- `{working_dir}`
-- `{trainee_dir}`
-- `{session_id}`
-- `{round_index}`
-- `{session_dir}`: 当前 session 的项目内输出目录，形如 `.trainee/runs/session-0001`
-- `{round_dir}`: 当前 round 的项目内输出目录，形如 `.trainee/runs/session-0001/round-0001`
-- `{config_path}`: 当前 round 的默认 config 快照路径，形如 `.trainee/runs/session-0001/round-0001/config.yaml`
-- `{extra_args}`
+`init` 会探测 uv、`.venv`、conda 环境、训练入口、数据目录、配置文件及常见 `--max-iter`/`--max-steps` 参数，并把候选项写入 `.trainee/README.md`。默认使用 guarded 模式、stdout heartbeat 和 3 个 round。
 
 ## 项目运行
 
@@ -145,7 +134,13 @@ trainee init --force
 trainee run
 ```
 
-`trainee run` 会读取 `.trainee/project.json`，使用项目本地 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/`，启动 loop 并在当前终端等待完成。默认 guarded 模式要求系统安装 `bubblewrap`/`bwrap`；如果没有 `bwrap`，运行会失败并提示安装。
+`trainee run` 会先执行与 `trainee doctor` 相同的 preflight。数据路径、训练入口、环境或 sandbox 检查失败时不会创建 session 或启动训练。检查通过后，它读取 `.trainee/project.yaml`，使用项目本地 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/` 启动 loop。
+
+只检查配置和最终命令：
+
+```bash
+trainee run --dry-run
+```
 
 训练子进程在 guarded 模式下只能写项目 `.trainee/`，并会把 `HOME`、`XDG_CACHE_HOME`、`WANDB_DIR`、`HF_HOME`、`TORCH_HOME`、`MPLCONFIGDIR` 重定向到 `.trainee/` 下。需要临时绕过 sandbox 时显式使用：
 
@@ -193,7 +188,7 @@ git commit -m "local changes"
 git stash push -u
 ```
 
-## 工具式调用 ???
+## 工具式调用
 
 除了网页控制台，也可以把 Trainee 当作本地工具服务调用。先启动服务：
 
@@ -211,6 +206,8 @@ trainee tools
 
 - `project_register`
 - `project_get`
+- `project_get_program`
+- `project_update_program`
 - `loop_start`
 - `loop_get`
 - `loop_stop`
@@ -218,120 +215,70 @@ trainee tools
 - `runs_get`
 - `prompt_preview`
 
-注册项目可以准备一个 `project.json`：
-
-```json
-{
-  "project_root": "/path/to/external-project",
-  "working_dir": "/path/to/external-project",
-  "launcher_template": "python {project_root}/train.py {extra_args}",
-  "security_mode": "guarded",
-  "data_paths": ["/path/to/external-project/data"],
-  "log_paths": ["/path/to/external-project/.trainee/logs/*.log"],
-  "signal_sources": [
-    {"type": "stdout"},
-    {
-      "type": "log_file_mtime",
-      "paths": ["/path/to/external-project/.trainee/logs/*.log"]
-    }
-  ],
-  "heartbeat_interval_sec": 5,
-  "stall_timeout_sec": 120,
-  "max_rounds": 3,
-  "tunable_params": [
-    {
-      "name": "lr",
-      "flag": "--lr",
-      "type": "float",
-      "default": 0.1,
-      "min_value": 0.001,
-      "max_value": 1.0
-    }
-  ],
-  "metric_specs": [
-    {
-      "name": "total_loss",
-      "source": "log_file_regex",
-      "path": "/path/to/external-project/.trainee/logs/*.log",
-      "key_or_pattern": "total_loss=(?P<value>-?\\d+(?:\\.\\d+)?)",
-      "goal": "min",
-      "required": true
-    }
-  ]
-}
-```
-
-然后按工具名调用：
+`project_register` 接收与 `project.yaml` 相同的结构，并额外要求顶层 `project_root`。注册后会写回该项目的 `.trainee/project.yaml`，因此 CLI、Web UI 和工具调用共享同一个配置来源。
 
 ```bash
-trainee call project_register --input @project.json
+trainee call project_register --input @registration.json
 trainee call loop_start
 trainee call loop_get
 trainee call runs_list
 trainee call runs_get --input '{"run_id": 1}'
 ```
 
-也可以通过 stdin 传入 JSON：
-
-```bash
-printf '%s\n' '{"run_id": 1}' | trainee call runs_get --input -
-```
-
 如果没有安装全局 CLI，把以上命令里的 `trainee` 替换为 `uv run trainee`。
 
-## 配置字段
+## project.yaml
 
-- `project_root`: 外部训练项目根目录
-- `working_dir`: 训练命令实际执行目录
-- `launcher_template`: 完整启动命令模板
-- `security_mode`: `guarded` 或 `unsafe`，默认 `guarded`
-- `data_paths`: 数据路径列表，JSON 数组
-- `log_paths`: 旧版兼容字段；未配置 `signal_sources` 时用作日志 mtime signal，也会作为旧 `log_regex` 的日志输入
-- `signal_sources`: heartbeat 信号来源，支持 `stdout`、`stderr`、`log_file_mtime`、`heartbeat_json`
-- `tunable_params`: 可调参数白名单，JSON 数组
-- `metric_specs`: 训练结果指标规则，JSON 数组
-- `metric_prompt`: 给 agent 的指标解读提示
-- `tuning_prompt`: 给 agent 的调参提示
+```yaml
+version: 1
 
-`tunable_params` 示例：
+data:
+  - path: data/train
+    flag: --data-root
 
-```json
-[
-  {
-    "name": "lr",
-    "flag": "--lr",
-    "type": "float",
-    "default": 0.1,
-    "min_value": 0.001,
-    "max_value": 1.0
-  },
-  {
-    "name": "epochs",
-    "flag": "--epochs",
-    "type": "int",
-    "default": 3,
-    "min_value": 1,
-    "max_value": 20
-  }
-]
+launch:
+  environment: conda       # system | uv | venv | conda
+  env_name: trainer
+  command: [python, train.py]
+  args:
+    - flag: --config
+      value: configs/base.yaml
+
+run:
+  max_rounds: 3
+  timeout_minutes: 60
+  fixed_args:
+    - flag: --max-iter
+      value: 1000
+
+tuning:
+  params:
+    - name: lr
+      flag: --lr
+      type: float
+      default: 0.001
+      min_value: 0.00001
+      max_value: 0.1
+
+metrics:
+  specs:
+    - name: total_loss
+      source: stdout_regex
+      key_or_pattern: 'total_loss=(?P<value>-?\d+(?:\.\d+)?)'
+      goal: min
+      required: true
+
+advanced: {}
 ```
 
-`metric_specs` 示例：
+- `data`: 数据路径；相对路径以项目根目录解析。可选 `flag` 会把路径作为固定训练参数传入。
+- `launch`: 环境和训练命令。`uv` 自动添加 `uv run`，`venv` 使用 `.venv/bin/python`，`conda` 使用 `conda run -n ENV`。
+- `run.fixed_args`: 每轮固定不变，例如 `--max-iter`、`--limit` 或固定 config。
+- `tuning.params`: agent 唯一可以修改的参数白名单。
+- `metrics.specs`: 指标抽取规则。
+- `advanced`: 可覆盖 `security_mode`、`working_dir`、heartbeat、signal sources、W&B 和 `shell_command`。
 
-```json
-[
-  {
-    "name": "total_loss",
-    "source": "log_file_regex",
-    "path": ".trainee/logs/*.log",
-    "key_or_pattern": "total_loss=(?P<value>-?\\d+(?:\\.\\d+)?)",
-    "goal": "min",
-    "required": true
-  }
-]
-```
-
-`metric_specs.source` 常用值：
+`metrics.specs.source` 常用值：
 
 - `stdout_regex`: 只从 Trainee 捕获的子进程 stdout/stderr 内部日志中按正则抽取。
 - `log_file_regex`: 从 `path` 或 `paths` 指定的日志文件/glob 中按正则抽取；glob 会在评估时重新展开。
@@ -348,6 +295,7 @@ Trainee 的项目初始化目录和全局配置目录是分开的：
 - 项目运行数据默认放在项目内 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/`；`TRAINEE_DATA_DIR` 只覆盖运行数据目录，不影响 Provider 配置位置。
 - Provider 设置优先级为：进程环境变量最高，`~/.trainee/config.json` 其次。
 - 项目不读取 `.env` 文件；Web UI 保存 provider 设置时只写 `~/.trainee/config.json`。
+- Agent Debug 默认关闭；可在 Runtime 页面开启，开启后后续 round 会保存 provider 原始响应、解析/校验错误和 heuristic fallback 原因。运行中的 loop 不允许切换该开关。
 
 未配置 LLM key 时，runtime 会自动回退到启发式调参。
 
@@ -355,6 +303,7 @@ Trainee 的项目初始化目录和全局配置目录是分开的：
 
 ```json
 {
+  "agent_debug_enabled": false,
   "llm_provider": "moonshot",
   "llm_timeout_sec": 30,
   "moonshot": {
