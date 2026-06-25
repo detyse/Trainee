@@ -1,8 +1,8 @@
 <section id="prompt-section" class="panel panel-full" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
   <div class="panel-header">
     <div>
-      <p class="panel-kicker">Agent Program</p>
-      <h2>Rules And Model Request</h2>
+      <p class="panel-kicker">System Prompt</p>
+      <h2>Global Instructions And Model Request</h2>
     </div>
     {% if prompt_preview %}
       <span class="status-pill status-{{ prompt_preview.status|replace('_', '-') }}">{{ prompt_preview.status }}</span>
@@ -12,20 +12,18 @@
   <form
     class="stacked-form program-editor"
     method="post"
-    action="/ui/project/program"
-    hx-post="/ui/project/program"
+    action="/ui/runtime/system-prompt"
+    hx-post="/ui/runtime/system-prompt"
     hx-target="#prompt-section"
     hx-swap="outerHTML"
   >
     <label>
-      <span>Fixed agent rules</span>
-      <textarea name="content" rows="12">{{ agent_program.content }}</textarea>
+      <span>Complete system message</span>
+      <textarea name="system_prompt" rows="14" {% if runtime_settings.loop_running %}disabled{% endif %}>{{ runtime_settings.system_prompt }}</textarea>
     </label>
-    {% if agent_program.path %}
-      <span class="muted">{{ agent_program.path }}</span>
-    {% endif %}
+    <span class="muted">Global config: {{ runtime_settings.global_config_path }}</span>
     <div class="actions">
-      <button class="primary" type="submit">Save Agent Rules</button>
+      <button class="primary" type="submit" {% if runtime_settings.loop_running %}disabled{% endif %}>Save System Prompt</button>
     </div>
   </form>
 

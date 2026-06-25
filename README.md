@@ -1,280 +1,140 @@
 # Trainee
 
-保守的自动训练 agent
+Trainee is a conservative agent runtime for automating external model-training loops.
 
-Trainee 是一个面向训练自动化的 agent runtime。它不承载训练代码本身，而是接入外部训练项目与外部训练环境，围绕“读上下文 -> 发起训练 -> 监控 heartbeat -> 解析结果 -> 决定下一轮参数 -> 自动继续或停止”这条闭环，提供一个最小可用的 runtime 和控制台。
+It does not contain your training code. Instead, it connects to an existing training project, runs the project’s own training command, watches for progress signals, extracts metrics, asks an LLM or a fallback decision policy for the next parameter set, and repeats until it stops.
 
-## 能力范围
+The intended loop is:
 
-- 注册一个本机外部训练项目，并用 `.trainee/project.yaml` 保存数据、环境、固定运行预算、可调参数和指标规则。
-- 自动扫描外部项目，生成 `ProjectContext`，把“项目是什么、数据在哪、训练入口在哪、参数怎么调、结果怎么看”固化进上下文。
-- 使用显式 launcher 执行训练，例如 `conda run ... python train.py ...` 或 `/path/to/train.sh ...`。
-- 默认用 bubblewrap 进行 guarded run：宿主文件系统只读，只有项目内 `.trainee/` 可写。
-- 通过本地子进程输出、日志文件更新时间等 signal source 做 heartbeat 检测；超过阈值则标记 stalled。
-- 通过 stdout regex、显式日志文件 regex、JSONL 等 metric source 抽取 `loss/total_loss` 和自定义指标。
-- 通过轻量控制台查看项目信息、loop 状态、轮次历史、命令、参数、日志路径、W&B 链接和 agent 决策。
-
-## 快速开始
-
-1. agent 安装：
-
-```bash
-cd /path/to/trainee
-uv tool install -e .
+```text
+read project context -> run training -> monitor heartbeat -> parse metrics
+-> compare with baseline / best-so-far -> decide next params -> continue or stop
 ```
 
-2. 在训练项目中初始化：
+## What Trainee provides
+
+- Project initialization through `.trainee/project.yaml`.
+- Automatic discovery of likely entrypoints, data directories, config files, environment type, and fixed training-limit flags.
+- Structured launch commands for `system`, `uv`, `.venv`, and `conda` environments.
+- A guarded execution mode using `bubblewrap`, where the project is read-only and only `.trainee/` is writable.
+- Heartbeat monitoring from stdout, stderr, log-file modification times, or heartbeat JSON files.
+- Metric extraction from stdout regexes, log regexes, JSONL files, and W&B summary files.
+- Baseline-first research state, best-so-far tracking, hypothesis/change-summary tracking, and rejected-change avoidance.
+- Session reports and ledgers exported as Markdown, CSV, JSONL, and JSON.
+- A local Web UI and HTTP tool API for project setup, loop control, prompt preview, run inspection, provider settings, and reports.
+
+## Requirements
+
+- Python 3.9 or newer.
+- Linux is recommended for guarded mode.
+- `bubblewrap` / `bwrap` is required for guarded runs.
+- `uv` is recommended for installation, but Trainee itself is a normal Python package.
+- A working external training project with a command that can run from the terminal.
+
+If `bwrap` is unavailable or the training job must write outside `.trainee/`, run explicitly with `--unsafe`.
+
+## Installation
+
+From this repository:
+
+```bash
+uv tool install --editable . --force
+uv tool update-shell
+```
+
+Restart the shell if needed, then verify:
+
+```bash
+trainee version
+trainee --help
+```
+
+For local development without installing globally:
+
+```bash
+uv run trainee --help
+```
+
+## Quick start
+
+Run these commands inside the training project you want Trainee to control:
 
 ```bash
 cd /path/to/training-project
 trainee init
 ```
 
-3. 编辑 `.trainee/project.yaml`，然后检查最终 baseline 命令：
+Then edit the generated config:
+
+```bash
+$EDITOR .trainee/project.yaml
+```
+
+Validate the project and inspect the final baseline command:
 
 ```bash
 trainee doctor
 trainee run --dry-run
 ```
 
-4. 开始运行：
+Start the loop:
 
 ```bash
 trainee run
 ```
 
-如需网页配置和运行监控，执行 `trainee webui` 并打开 `http://127.0.0.1:8000`。
-
-## 全局 CLI 安装
-
-如果希望在任意目录直接使用 `trainee`，推荐用 `uv tool install` 做用户级全局安装：
+Start the Web UI:
 
 ```bash
-cd /path/to/Trainee
-uv tool install --editable . --force
-uv tool update-shell
+trainee webui
 ```
 
-重启 shell 后验证：
+Open `http://127.0.0.1:8000` if the browser does not open automatically.
+
+## Project initialization
+
+`trainee init` creates:
+
+- `.trainee/project.yaml` — the main project run configuration.
+- `.trainee/context.md` — Trainee’s generated understanding of the project.
+- `.trainee/README.md` — notes about detected candidates and local Trainee files.
+- `.trainee/logs/`, `.trainee/runs/`, `.trainee/artifacts/` — runtime output locations.
+
+Initialization is non-destructive by default. Existing files are kept.
 
 ```bash
-trainee --help
-trainee version
-trainee webui --host 127.0.0.1 --port 8000
-```
-
-`trainee version` 会输出当前版本和该版本的最后更新日期。
-
-`trainee webui` 会启动本地服务并打开浏览器页面；只想启动服务、不打开浏览器时使用 `trainee serve`，或运行 `trainee webui --no-open`。
-
-`--editable` 会让全局命令直接指向当前源码目录。后续修改或拉取代码后，通常不需要重新安装，`trainee` 会直接使用新代码。
-
-如果 shell 还找不到 `trainee`，临时加入 PATH：
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-也可以直接使用完整路径：
-
-```bash
-$HOME/.local/bin/trainee --help
-```
-
-Provider 配置默认写入 `$HOME/.trainee/config.json`。项目运行数据写入项目内 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/`；如果希望运行数据放到别的位置，可以设置 `TRAINEE_DATA_DIR`。
-
-## 项目初始化
-
-在目标训练项目目录执行：
-
-```bash
-cd ~/project/toymodel
 trainee init
-```
-
-`init` 是项目初始化动作，不启动 Web UI。它会生成一份可编辑的项目草稿，而不是直接开始训练。它会像 agent 一样在终端输出本次读了哪些文件、写了哪些文件，例如：
-
-```text
-Trainee init
-- Project: /home/user/project/toymodel
-- Status: initialized new project files
-
-Files
-- Read: README.md
-- Read: train.py
-- Wrote: .trainee/project.yaml
-- Wrote: .trainee/context.md
-- Wrote: .trainee/program.md
-- Wrote: .trainee/README.md
-- Config: .trainee/project.yaml
-
-Discovery
-- Environment: conda (trainer)
-- Entrypoints: train.py
-- Data candidates: data
-- Config candidates: configs/base.yaml
-- Training limit candidates: --max-iter=1000
-
-Effective configuration
-- Environment: conda (trainer)
-- Working directory: /home/user/project/toymodel
-- Security: guarded
-- Budget: max_rounds=3, timeout=60 minutes
-- Data inputs: data
-- Launch arguments: --config=configs/base.yaml
-- Fixed arguments: --max-iter=1000
-- Tunable parameters: none
-- Metrics: none (built-in loss/total_loss parsing only)
-- Runtime: kill_on_stall=true, wandb=disabled
-- Heartbeat: every 5s, stall after 120s; sources=stdout; log_file_mtime(.trainee/logs/**/*.log, .trainee/runs/**/*.log)
-- Log paths: .trainee/logs/**/*.log, .trainee/runs/**/*.log
-- Launcher: conda run -n trainer python train.py --config configs/base.yaml --max-iter 1000 {extra_args}
-
-Next
-- Review: .trainee/project.yaml, .trainee/context.md, and .trainee/program.md
-- Validate: trainee doctor or trainee run --dry-run
-- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`
-```
-
-项目内生成的 `.trainee/` 用来保存这个项目的初始化草稿和上下文说明：
-
-- `.trainee/project.yaml`: 唯一面向用户的运行配置。
-- `.trainee/context.md`: Trainee 读取项目代码后生成的项目理解。
-- `.trainee/program.md`: 每轮 decision 都会使用的固定 agent rules，可直接编辑，也可在 Web UI 的 Prompt 页修改。
-- `.trainee/README.md`: 本目录文件说明。
-
-推荐工作流：
-
-1. 编辑 `.trainee/project.yaml`，确认数据、环境、训练命令、固定限制、可调参数和指标。
-2. 检查 `.trainee/program.md` 与 `.trainee/context.md`，补充 agent 规则和项目目标。
-3. 运行 `trainee doctor` 或 `trainee run --dry-run`，检查完整 baseline 命令。
-4. 确认无误后运行 `trainee run`。
-
-如果文件已存在，`trainee init` 默认保留旧文件；需要重写时使用：
-
-```bash
+trainee init --baseline-config configs/base.yaml
 trainee init --force
 ```
 
-`init` 会分别输出自动探测到的候选信息和最终生效配置，包括环境、训练入口、数据目录、配置文件、固定预算参数、可调参数、指标、heartbeat 与完整 launcher，并把候选项写入 `.trainee/README.md`。默认使用 guarded 模式、stdout heartbeat 和 3 个 round。
+`--baseline-config` must point to an existing file inside the project. Trainee records it as `launch.baseline_config` and passes it to the launcher as `--config <absolute-path>`.
 
-## 项目运行
+Detected config files are suggestions only. Trainee does not automatically choose `config.yaml`, `environment.yml`, or any other config as the baseline.
 
-在目标训练项目目录执行：
+## Configuration: `.trainee/project.yaml`
 
-```bash
-trainee run
-```
+The config file is the source of truth for CLI, Web UI, and tool API runs.
 
-`trainee run` 会先执行与 `trainee doctor` 相同的 preflight。数据路径、训练入口、环境或 sandbox 检查失败时不会创建 session 或启动训练。检查通过后，它读取 `.trainee/project.yaml`，使用项目本地 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/` 启动 loop。
-
-只检查配置和最终命令：
-
-```bash
-trainee run --dry-run
-```
-
-训练子进程在 guarded 模式下只能写项目 `.trainee/`，并会把 `HOME`、`XDG_CACHE_HOME`、`WANDB_DIR`、`HF_HOME`、`TORCH_HOME`、`MPLCONFIGDIR` 重定向到 `.trainee/` 下。需要临时绕过 sandbox 时显式使用：
-
-```bash
-trainee run --unsafe
-```
-
-普通 `trainee serve` 不绑定当前目录，也不会自动初始化当前目录。项目初始化只通过 `trainee init` 显式发生。`trainee launch` 暂时保留为兼容 alias。
-
-## 后续更新
-
-更新代码：
-
-```bash
-cd /path/to/Trainee
-git status
-git pull --ff-only origin main
-```
-
-如果只改了 Python 源码，editable 全局 CLI 会自动使用新代码。
-
-如果更新涉及依赖、`pyproject.toml`、命令入口或静态资源打包配置，重新安装一次全局 CLI：
-
-```bash
-cd /path/to/Trainee
-uv tool install --editable . --force
-```
-
-然后验证：
-
-```bash
-trainee --help
-```
-
-更新前如果有本地修改，先提交或暂存，避免 `git pull` 冲突：
-
-```bash
-git add .
-git commit -m "local changes"
-```
-
-或：
-
-```bash
-git stash push -u
-```
-
-## 工具式调用
-
-除了网页控制台，也可以把 Trainee 当作本地工具服务调用。先启动服务：
-
-```bash
-trainee serve
-```
-
-查看可用工具和 JSON Schema：
-
-```bash
-trainee tools
-```
-
-工具清单使用 OpenAI-style function schema 形状，工具名只包含字母、数字和下划线，方便直接交给 agent 编排。常用工具：
-
-- `project_register`
-- `project_get`
-- `project_get_program`
-- `project_update_program`
-- `loop_start`
-- `loop_get`
-- `loop_stop`
-- `runs_list`
-- `runs_get`
-- `prompt_preview`
-
-`project_register` 接收与 `project.yaml` 相同的结构，并额外要求顶层 `project_root`。注册后会写回该项目的 `.trainee/project.yaml`，因此 CLI、Web UI 和工具调用共享同一个配置来源。
-
-```bash
-trainee call project_register --input @registration.json
-trainee call loop_start
-trainee call loop_get
-trainee call runs_list
-trainee call runs_get --input '{"run_id": 1}'
-```
-
-如果没有安装全局 CLI，把以上命令里的 `trainee` 替换为 `uv run trainee`。
-
-## project.yaml
+Example:
 
 ```yaml
 version: 1
 
 data:
-  - path: data/train
+  - path: data
     flag: --data-root
 
 launch:
-  environment: conda       # system | uv | venv | conda
+  environment: conda
   env_name: trainer
-  command: [python, train.py]
+  command:
+    - python
+    - train.py
+  baseline_config: configs/base.yaml
   args:
-    - flag: --config
-      value: configs/base.yaml
+    - flag: --seed
+      value: 7
 
 run:
   max_rounds: 3
@@ -290,109 +150,316 @@ tuning:
       type: float
       default: 0.001
       min_value: 0.00001
-      max_value: 0.1
+      max_value: 0.01
 
 metrics:
   specs:
-    - name: total_loss
+    - name: val_loss
       source: stdout_regex
-      key_or_pattern: 'total_loss=(?P<value>-?\d+(?:\.\d+)?)'
+      key_or_pattern: 'val_loss=(?P<value>-?\d+(?:\.\d+)?)'
       goal: min
       required: true
+  prompt: "Use val_loss as the primary model-selection metric."
 
-advanced: {}
+advanced:
+  security_mode: guarded
+  working_dir: .
+  heartbeat_interval_sec: 5
+  stall_timeout_sec: 120
+  kill_on_stall: true
+  signal_sources:
+    - type: stdout
+    - type: log_file_mtime
+      paths:
+        - .trainee/logs/**/*.log
+        - .trainee/runs/**/*.log
+  log_paths:
+    - .trainee/logs/**/*.log
+    - .trainee/runs/**/*.log
+  wandb_enabled: false
+  tuning_prompt: "Change only one high-impact parameter per round unless the evidence is strong."
 ```
 
-- `data`: 数据路径；相对路径以项目根目录解析。可选 `flag` 会把路径作为固定训练参数传入。
-- `launch`: 环境和训练命令。`uv` 自动添加 `uv run`，`venv` 使用 `.venv/bin/python`，`conda` 使用 `conda run -n ENV`。
-- `run.fixed_args`: 每轮固定不变，例如 `--max-iter`、`--limit` 或固定 config。
-- `tuning.params`: agent 唯一可以修改的参数白名单。
-- `metrics.specs`: 指标抽取规则。
-- `advanced`: 可覆盖 `security_mode`、`working_dir`、heartbeat、signal sources、W&B 和 `shell_command`。
+### Launch environments
 
-`metrics.specs.source` 常用值：
+`launch.environment` controls how `launch.command` is wrapped:
 
-- `stdout_regex`: 只从 Trainee 捕获的子进程 stdout/stderr 内部日志中按正则抽取。
-- `log_file_regex`: 从 `path` 或 `paths` 指定的日志文件/glob 中按正则抽取；glob 会在评估时重新展开。
-- `jsonl`: 从 `path` 或 `paths` 指定的 JSONL 文件中读取最后一个可解析数值，`key_or_pattern` 为字段名或点分路径。
-- `log_regex`: 旧版兼容来源，会读取内部日志和 `log_paths`。
+| Environment | Rendered command prefix |
+| --- | --- |
+| `system` | `python train.py` |
+| `uv` | `uv run python train.py` |
+| `venv` | `<project>/.venv/bin/python train.py` when command starts with `python` or `python3` |
+| `conda` | `conda run -n <env_name> python train.py` |
 
-## 全局配置与 LLM Provider
+Trainee appends arguments in this order:
 
-Trainee 的项目初始化目录和全局配置目录是分开的：
+1. `launch.baseline_config` as `--config <path>`, if set.
+2. `launch.args`.
+3. `data` entries that have a `flag`.
+4. `run.fixed_args`.
+5. Agent-controlled `tuning.params`.
 
-- 在训练项目目录执行 `trainee init`，例如 `cd ~/project/toymodel && trainee init`，Trainee 会读取当前目录并生成项目内 `.trainee/` 文件。
-- 普通 `trainee serve` 不读取当前目录，也不会自动初始化当前目录。
-- Provider 全局配置默认放在 `~/.trainee/config.json`。
-- 项目运行数据默认放在项目内 `.trainee/runtime.sqlite3` 和 `.trainee/artifacts/`；`TRAINEE_DATA_DIR` 只覆盖运行数据目录，不影响 Provider 配置位置。
-- Provider 设置优先级为：进程环境变量最高，`~/.trainee/config.json` 其次。
-- 项目不读取 `.env` 文件；Web UI 保存 provider 设置时只写 `~/.trainee/config.json`。
-- Agent Debug 默认关闭；可在 Runtime 页面开启，开启后后续 round 会保存 provider 原始响应、解析/校验错误和 heuristic fallback 原因。运行中的 loop 不允许切换该开关。
+Only `tuning.params` may be changed by the agent. `run.fixed_args` stay constant across every round.
 
-未配置 LLM key 时，runtime 会自动回退到启发式调参。
+For commands that cannot be expressed structurally, use `advanced.shell_command`. Include `{extra_args}` where the generated tunable parameters should be inserted.
 
-`~/.trainee/config.json` Moonshot / Kimi 示例：
+Available command-template variables:
 
-```json
-{
-  "agent_debug_enabled": false,
-  "llm_provider": "moonshot",
-  "llm_timeout_sec": 30,
-  "moonshot": {
-    "api_key": "sk-...",
-    "base_url": "https://api.moonshot.cn/v1",
-    "model": "kimi-k2.6"
-  }
-}
-```
+- `{project_root}`
+- `{working_dir}`
+- `{trainee_dir}`
+- `{extra_args}`
+- `{session_id}`
+- `{round_index}`
+- `{session_dir}`
+- `{round_dir}`
+- `{config_path}`
 
-`~/.trainee/config.json` OpenAI-compatible 示例：
+The same round workspace is also exposed through environment variables:
 
-```json
-{
-  "llm_provider": "openai",
-  "llm_timeout_sec": 30,
-  "openai": {
-    "api_key": "sk-...",
-    "base_url": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini"
-  }
-}
-```
+- `TRAINEE_SESSION_ID`
+- `TRAINEE_ROUND_INDEX`
+- `TRAINEE_SESSION_DIR`
+- `TRAINEE_ROUND_DIR`
+- `TRAINEE_CONFIG_PATH`
 
-`~/.trainee/config.json` Claude / Anthropic 示例：
+This is useful when a wrapper script needs to write a generated per-round config file.
 
-```json
-{
-  "llm_provider": "anthropic",
-  "llm_timeout_sec": 30,
-  "anthropic": {
-    "api_key": "sk-ant-...",
-    "base_url": "https://api.anthropic.com",
-    "model": "claude-3-5-sonnet-latest",
-    "version": "2023-06-01",
-    "max_tokens": 1024
-  }
-}
-```
+## Metrics and stopping behavior
 
-如果不显式设置 `TRAINEE_LLM_PROVIDER`，runtime 会自动优先使用已存在的 key：
+Trainee always tries to parse built-in `loss` and `total_loss` values from captured output and configured log paths.
 
-- 有 `MOONSHOT_API_KEY` 时走 `moonshot`
-- 有 `OPENAI_API_KEY` 时走 `openai`
-- 只有 `ANTHROPIC_API_KEY` 时走 `anthropic`
-- 这些 key 都没有时禁用 LLM，回退到启发式策略
+Custom metrics can use:
 
-## LLM 决策
+- `stdout_regex`
+- `log_regex`
+- `log_file_regex`
+- `jsonl`
+- `wandb_summary`
 
-- `moonshot` provider 调用 `MOONSHOT_BASE_URL/chat/completions`，默认使用 `kimi-k2.6` 生成结构化 `AgentDecision`。
-- `openai` provider 调用 `OPENAI_BASE_URL/chat/completions`，使用 `OPENAI_MODEL` 生成结构化 `AgentDecision`。
-- `anthropic` provider 调用 `ANTHROPIC_BASE_URL/v1/messages`，使用 Claude Messages API 生成结构化 `AgentDecision`。
-- 如果没有配置 LLM，runtime 会回退到一个保守的启发式策略，优先调整 `lr` / `learning_rate` 一类参数。
+Regex metrics should expose the value either as the first capture group or as a named `(?P<value>...)` group.
 
+If `metrics.specs` is empty, at least `loss` or `total_loss` must be found. If required custom metrics are missing, the round is marked `completed_without_metrics` and the session fails.
 
-## 测试
+The first completed round is treated as the baseline. Later rounds are compared against both the baseline and best-so-far round.
+
+If no `tuning.params` are configured, Trainee runs the latest result collection and then stops because there is nothing safe for the agent to change.
+
+## Runtime outputs
+
+By default, project runtime data is stored under the training project’s `.trainee/` directory:
+
+- `.trainee/runtime.sqlite3` — local run database.
+- `.trainee/artifacts/session-XXXX/round-XXXX.log` — captured stdout/stderr.
+- `.trainee/artifacts/session-XXXX/report.md` — Markdown session report.
+- `.trainee/artifacts/session-XXXX/result_ledger.csv` — human-readable experiment ledger.
+- `.trainee/artifacts/session-XXXX/result_ledger.jsonl` — machine-readable experiment ledger.
+- `.trainee/artifacts/session-XXXX/research_state.json` — baseline, best-so-far, recent rounds, tried changes, and rejected changes.
+- `.trainee/runs/session-XXXX/round-XXXX/` — per-round workspace.
+
+Set `TRAINEE_DATA_DIR` to store runtime data elsewhere.
+
+## Guarded vs unsafe execution
+
+The default security mode is `guarded`.
+
+In guarded mode:
+
+- The host filesystem is mounted read-only.
+- The training project is read-only.
+- The project’s `.trainee/` directory is writable.
+- `/tmp` is an isolated tmpfs.
+- `HOME`, `XDG_CACHE_HOME`, `HF_HOME`, `TORCH_HOME`, `MPLCONFIGDIR`, and `WANDB_DIR` are redirected into `.trainee/`.
+- Log, signal, and metric file paths must stay inside `.trainee/`.
+
+Use this mode when the training command can write logs/checkpoints/cache under `.trainee/`.
+
+Use unsafe mode when a project is not yet adapted for guarded execution:
 
 ```bash
-pytest
+trainee run --unsafe
+```
+
+Unsafe mode still redirects common cache/home variables into `.trainee/`, but it does not use `bubblewrap` isolation.
+
+## LLM provider configuration
+
+Trainee supports `none`, `moonshot`, `openai`, and `anthropic`.
+
+For real tuning decisions, configure a provider explicitly:
+
+```bash
+export TRAINEE_LLM_PROVIDER=openai
+export OPENAI_API_KEY=...
+export OPENAI_MODEL=gpt-4o-mini
+```
+
+Moonshot:
+
+```bash
+export TRAINEE_LLM_PROVIDER=moonshot
+export MOONSHOT_API_KEY=...
+export MOONSHOT_MODEL=kimi-k2.6
+```
+
+Anthropic:
+
+```bash
+export TRAINEE_LLM_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=...
+export ANTHROPIC_MODEL=claude-3-5-haiku-latest
+```
+
+Provider settings can also be edited in the Web UI. They are saved to:
+
+```text
+~/.trainee/config.json
+```
+
+The global decision system prompt is stored in the same file and can be edited from the Web UI or `/api/runtime/system-prompt`.
+
+If no provider is configured, Trainee uses a limited heuristic fallback. That is useful for smoke tests, but not a replacement for an actual research decision model.
+
+## Prompt and project guidance
+
+The decision prompt includes:
+
+- The global system prompt.
+- `.trainee/context.md`.
+- `context.md`, if present at the project root.
+- `constraints.md`, if present at the project root.
+- `metrics.prompt` from `project.yaml`.
+- `advanced.tuning_prompt` from `project.yaml`.
+- Baseline, best-so-far, recent rounds, tried changes, and rejected changes.
+
+Use `constraints.md` for stable project rules such as “do not change batch size”, “keep evaluation split fixed”, or “only optimize validation MPJPE”.
+
+Use `advanced.tuning_prompt` for run-specific tuning strategy.
+
+## CLI reference
+
+```bash
+trainee version
+trainee init [project_root] [--baseline-config PATH] [--force]
+trainee doctor [project_root]
+trainee run [project_root] [--dry-run] [--guarded | --unsafe]
+trainee webui [--host HOST] [--port PORT] [--reload] [--no-open]
+trainee serve [--host HOST] [--port PORT] [--reload]
+trainee tools [--base-url URL] [--name TOOL_NAME]
+trainee call TOOL_NAME --input JSON_OR_@FILE_OR_-
+trainee report SESSION_ID [--output report.md]
+```
+
+Notes:
+
+- Running `trainee` with no subcommand starts the local service, equivalent to `trainee serve`.
+- `trainee launch` is kept as a compatibility alias for `trainee init`.
+- `trainee run --dry-run` runs preflight checks and prints the baseline command without creating a runtime database.
+- `trainee doctor` fails before a session starts if data paths, environment, launcher, sandbox paths, or config validation are not ready.
+
+## Web UI
+
+Start the UI:
+
+```bash
+trainee webui
+```
+
+The UI can:
+
+- Register or edit a training project.
+- Save the same `.trainee/project.yaml` used by the CLI.
+- Start, stop, and inspect the loop.
+- Preview the next decision prompt.
+- Edit provider settings and the global system prompt.
+- Save and apply prompt presets.
+- Inspect run logs, decisions, agent traces, W&B links, reports, and ledgers.
+- Test the configured LLM provider from `/llm-test`.
+
+To start the service without opening a browser:
+
+```bash
+trainee serve
+```
+
+or:
+
+```bash
+trainee webui --no-open
+```
+
+## Tool API
+
+Start the local service:
+
+```bash
+trainee serve
+```
+
+Print OpenAI-style function schemas:
+
+```bash
+trainee tools
+trainee tools --name loop_start
+```
+
+Call a tool:
+
+```bash
+trainee call loop_get
+trainee call runs_get --input '{"run_id": 1}'
+trainee call project_get
+```
+
+Common tools:
+
+- `project_register`
+- `project_get`
+- `project_update_context`
+- `runtime_provider_get`
+- `runtime_provider_update`
+- `runtime_debug_get`
+- `runtime_debug_update`
+- `runtime_system_prompt_get`
+- `runtime_system_prompt_update`
+- `prompt_preview`
+- `prompt_presets_list`
+- `prompt_presets_save`
+- `loop_start`
+- `loop_get`
+- `loop_stop`
+- `runs_list`
+- `runs_get`
+- `session_report`
+
+`project_register` accepts the same structure as `.trainee/project.yaml` plus a top-level `project_root`. It writes the normalized config back to that project.
+
+## Formal-use checklist
+
+Before using Trainee on a real training project:
+
+1. Commit or otherwise save the training project state.
+2. Run `trainee init` and review `.trainee/project.yaml`.
+3. Confirm `data` paths exist and stay inside the project root.
+4. Confirm `launch.command`, `launch.baseline_config`, `launch.args`, and `run.fixed_args` reproduce the intended baseline command.
+5. Confirm only safe parameters are listed in `tuning.params`.
+6. Confirm metrics can be parsed from stdout, `.trainee/` logs, JSONL, or W&B summary.
+7. For guarded mode, make the training job write logs, checkpoints, W&B files, and caches under `.trainee/`.
+8. Run `trainee doctor`.
+9. Run `trainee run --dry-run` and inspect the printed command.
+10. Configure an LLM provider if you expect non-trivial tuning decisions.
+11. Start with a small `max_rounds` and short timeout before increasing the budget.
+
+## Development
+
+Run tests:
+
+```bash
+uv run pytest
+```
+
+The package entrypoint is:
+
+```text
+trainee = trainee.cli:main
 ```

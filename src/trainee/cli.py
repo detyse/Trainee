@@ -17,8 +17,7 @@ from trainee import __updated_at__, __version__
 from trainee.context_builder import ContextBuilder
 from trainee.doctor import format_doctor_report, run_doctor
 from trainee.events import EventBus
-from trainee.models import AgentProgramUpdate, ProjectContext, PromptPreset
-from trainee.program import DEFAULT_AGENT_PROGRAM
+from trainee.models import ProjectContext, PromptPreset
 from trainee.orchestrator import RuntimeService
 from trainee.project_config import (
     ProjectRegistration,
@@ -27,8 +26,9 @@ from trainee.project_config import (
     detect_project,
     load_project_config,
     project_config_path,
+    render_project_config_yaml,
 )
-from trainee.providers import AgentDebugSettingsUpdate, ProviderSettingsUpdate
+from trainee.providers import AgentDebugSettingsUpdate, ProviderSettingsUpdate, SystemPromptUpdate
 from trainee.settings import load_settings
 from trainee.storage import Storage
 
@@ -94,18 +94,18 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         input_schema=ProjectContext.model_json_schema(),
     ),
     ToolDefinition(
-        name="project_get_program",
-        description="Read the fixed agent rules from the project's .trainee/program.md.",
+        name="runtime_system_prompt_get",
+        description="Read the global system prompt used for training decisions.",
         method="GET",
-        path="/api/project/program",
+        path="/api/runtime/system-prompt",
         input_schema=_empty_schema(),
     ),
     ToolDefinition(
-        name="project_update_program",
-        description="Replace the fixed agent rules in the project's .trainee/program.md.",
+        name="runtime_system_prompt_update",
+        description="Replace the global system prompt and persist it to config.json.",
         method="POST",
-        path="/api/project/program",
-        input_schema=AgentProgramUpdate.model_json_schema(),
+        path="/api/runtime/system-prompt",
+        input_schema=SystemPromptUpdate.model_json_schema(),
     ),
     ToolDefinition(
         name="project_get",
@@ -244,7 +244,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "init":
         try:
-            result = init_project(Path(args.project_root), force=args.force)
+            result = init_project(
+                Path(args.project_root),
+                force=args.force,
+                baseline_config=args.baseline_config,
+            )
         except (OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -372,7 +376,11 @@ def fetch_report(
     return text
 
 
-def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
+def init_project(
+    project_root: Path,
+    force: bool = False,
+    baseline_config: str | None = None,
+) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     if not project_root.exists() or not project_root.is_dir():
         raise ValueError(f"project root does not exist or is not a directory: {project_root}")
@@ -383,7 +391,11 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
     (trainee_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     discovery = detect_project(project_root)
-    generated_config = default_project_config(project_root, discovery)
+    generated_config = default_project_config(
+        project_root,
+        discovery,
+        baseline_config=baseline_config,
+    )
     config_path = project_config_path(project_root)
     config = load_project_config(project_root) if config_path.is_file() and not force else generated_config
     spec = compile_project_spec(project_root, config)
@@ -393,7 +405,6 @@ def init_project(project_root: Path, force: bool = False) -> dict[str, Any]:
     outputs = {
         config_path: _render_project_yaml(generated_config),
         trainee_dir / "context.md": _render_context_markdown(context),
-        trainee_dir / "program.md": DEFAULT_AGENT_PROGRAM,
         trainee_dir / "README.md": _render_launch_readme(project_root, discovery),
     }
     already_initialized = all(path.exists() for path in outputs)
@@ -474,7 +485,7 @@ def _build_parser() -> argparse.ArgumentParser:
     webui_parser.add_argument("--no-open", action="store_true", help="Start the service without opening a browser.")
     webui_parser.set_defaults(command="webui")
 
-    version_parser = subparsers.add_parser("version", help="Print the installed version and last update date.")
+    version_parser = subparsers.add_parser("version", help="Print the installed version and last update date/time.")
     version_parser.set_defaults(command="version")
 
     init_parser = subparsers.add_parser(
@@ -484,6 +495,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     init_parser.add_argument("--force", action="store_true", help="Overwrite existing files under .trainee.")
+    init_parser.add_argument(
+        "--baseline-config",
+        help="Initialize launch.baseline_config with a project-local training config path.",
+    )
     init_parser.set_defaults(command="init")
 
     run_parser = subparsers.add_parser("run", help="Run the training loop from .trainee/project.yaml.")
@@ -608,6 +623,7 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     print(f"- Security: {spec.security_mode}")
     print(f"- Budget: max_rounds={spec.max_rounds}, timeout={timeout}")
     print(f"- Data inputs: {_format_data_inputs(config.data)}")
+    print(f"- Baseline config: {config.launch.baseline_config or 'not set'}")
     print(f"- Launch arguments: {_format_command_args(config.launch.args)}")
     print(f"- Fixed arguments: {_format_command_args(config.run.fixed_args)}")
     print(f"- Tunable parameters: {_format_tunable_params(spec.tunable_params)}")
@@ -632,7 +648,7 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
 
     print("")
     print("Next")
-    print("- Review: .trainee/project.yaml, .trainee/context.md, and .trainee/program.md")
+    print("- Review: .trainee/project.yaml and .trainee/context.md")
     print("- Validate: trainee doctor or trainee run --dry-run")
     print("- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`")
     for warning in result["warnings"]:
@@ -743,14 +759,7 @@ def _render_context_markdown(context: ProjectContext) -> str:
 
 
 def _render_project_yaml(config: Any) -> str:
-    import yaml
-
-    return yaml.safe_dump(
-        config.model_dump(mode="json", exclude_none=True),
-        sort_keys=False,
-        allow_unicode=True,
-        default_flow_style=False,
-    )
+    return render_project_config_yaml(config)
 
 
 def _render_launch_readme(project_root: Path, discovery: Any) -> str:
@@ -766,8 +775,8 @@ def _render_launch_readme(project_root: Path, discovery: Any) -> str:
             "",
             "- `project.yaml`: the only user-facing run configuration.",
             "- `context.md`: generated project understanding for review.",
-            "- `program.md`: fixed agent rules included in every decision system prompt.",
             "- `logs/`, `runs/`, and `artifacts/`: writable runtime outputs for guarded runs.",
+            "- The decision system prompt is global in `~/.trainee/config.json` and editable in the Web UI.",
             "",
             "Detected candidates:",
             "",
@@ -779,12 +788,13 @@ def _render_launch_readme(project_root: Path, discovery: Any) -> str:
             "",
             "Recommended workflow:",
             "",
-            "1. Edit `project.yaml`: confirm data, environment, command, fixed limits, tunable parameters, and metrics.",
-            "2. Review `program.md` and `context.md` for project-specific rules and goals.",
+            "1. Edit `project.yaml`: select `launch.baseline_config` and confirm data, environment, command, fixed limits, tunable parameters, and metrics.",
+            "2. Review `context.md` for the generated project understanding.",
             "3. Run `trainee doctor` or `trainee run --dry-run` and inspect the baseline command.",
             "4. Run `trainee run`.",
             "",
             "`run.fixed_args` are constant in every round. Only `tuning.params` may be changed by the agent.",
+            "Detected config files are suggestions only; Trainee never selects one automatically.",
             "Use `advanced.shell_command` only when the structured launcher cannot express the command.",
             "Guarded runs make the host filesystem read-only and keep writes inside this `.trainee/` directory.",
             "",

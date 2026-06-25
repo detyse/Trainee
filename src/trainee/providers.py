@@ -53,6 +53,10 @@ class AgentDebugSettingsUpdate(BaseModel):
     agent_debug_enabled: bool = False
 
 
+class SystemPromptUpdate(BaseModel):
+    system_prompt: str
+
+
 def normalize_provider(provider: str) -> LLMProvider:
     normalized = provider.strip().lower()
     if normalized not in PROVIDER_NAMES:

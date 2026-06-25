@@ -101,6 +101,56 @@ def test_launcher_analysis_accepts_round_workspace_output(tmp_path: Path) -> Non
     assert not any("may write outside .trainee" in message for message in messages)
 
 
+def test_launcher_analysis_accepts_local_python_module(tmp_path: Path) -> None:
+    module_dir = tmp_path / "pkg"
+    module_dir.mkdir()
+    (module_dir / "train.py").write_text("", encoding="utf-8")
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="conda run -n trainer python -u -m pkg.train {extra_args}",
+    )
+
+    section = _check_launcher(tmp_path, spec)
+
+    assert any(
+        finding.status == "ok" and finding.message == "train module: pkg.train"
+        for finding in section.findings
+    )
+    assert not any(finding.status == "fail" for finding in section.findings)
+
+
+def test_launcher_analysis_warns_for_external_python_module(tmp_path: Path) -> None:
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="uv run python -m installed_pkg.train {extra_args}",
+    )
+
+    section = _check_launcher(tmp_path, spec)
+
+    assert any(
+        finding.status == "warn" and "must be installed" in finding.message
+        for finding in section.findings
+    )
+    assert not any(finding.status == "fail" for finding in section.findings)
+
+
+def test_launcher_analysis_rejects_invalid_python_module(tmp_path: Path) -> None:
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="python -m bad/module {extra_args}",
+    )
+
+    section = _check_launcher(tmp_path, spec)
+
+    assert any(
+        finding.status == "fail" and finding.message == "invalid python module entrypoint: bad/module"
+        for finding in section.findings
+    )
+
+
 def test_environment_detects_uv_without_running_sync(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     calls: list[list[str]] = []

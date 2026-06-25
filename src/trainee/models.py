@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
@@ -90,6 +91,16 @@ class MetricSpec(BaseModel):
     def validate_source_paths(self) -> "MetricSpec":
         if self.source in {"log_file_regex", "jsonl"} and not self.path and not self.paths:
             raise ValueError(f"{self.source} requires path or paths")
+        if self.source in {"log_regex", "stdout_regex", "log_file_regex"}:
+            try:
+                pattern = re.compile(self.key_or_pattern)
+            except re.error as exc:
+                raise ValueError(f"{self.source} key_or_pattern is invalid regex: {exc}") from exc
+            if "value" not in pattern.groupindex and pattern.groups < 1:
+                raise ValueError(
+                    f"{self.source} key_or_pattern must contain a capture group "
+                    "or a named (?P<value>...) group"
+                )
         return self
 
 
@@ -214,16 +225,6 @@ class ProjectContext(BaseModel):
     parameter_summary: str = ""
     result_reading_summary: str = ""
     warnings: List[str] = Field(default_factory=list)
-
-
-class AgentProgram(BaseModel):
-    content: str = ""
-    path: str = ""
-    exists: bool = False
-
-
-class AgentProgramUpdate(BaseModel):
-    content: str = ""
 
 
 class PromptPreview(BaseModel):

@@ -60,6 +60,15 @@
         </label>
       </div>
       <label>
+        <span>Baseline config (project-relative, optional)</span>
+        <input
+          type="text"
+          name="baseline_config"
+          value="{{ cfg.launch.baseline_config or '' if cfg else '' }}"
+          placeholder="configs/base.yaml"
+        />
+      </label>
+      <label>
         <span>Launch arguments, one per line as <code>--flag=value</code></span>
         <textarea name="launch_args_lines" rows="4" placeholder="--config=configs/base.yaml">{% if cfg %}{% for item in cfg.launch.args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
       </label>

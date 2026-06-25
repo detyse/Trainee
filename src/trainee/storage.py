@@ -91,11 +91,14 @@ class Storage:
 
     def _set_setting(self, key: str, value: Dict[str, Any]) -> None:
         with self._lock:
-            self._connection.execute(
-                "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, json.dumps(value)),
-            )
-            self._connection.commit()
+            with self._connection:
+                self._write_setting(key, value)
+
+    def _write_setting(self, key: str, value: Dict[str, Any]) -> None:
+        self._connection.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value)),
+        )
 
     def _get_setting(self, key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -117,6 +120,19 @@ class Storage:
     def get_project_context(self) -> Optional[ProjectContext]:
         payload = self._get_setting("project_context")
         return ProjectContext.model_validate(payload) if payload else None
+
+    def save_project_registration(
+        self,
+        spec: ProjectSpec,
+        context: ProjectContext,
+        snapshot: Optional[LoopSnapshot] = None,
+    ) -> None:
+        with self._lock:
+            with self._connection:
+                self._write_setting("project_spec", spec.model_dump(mode="json"))
+                self._write_setting("project_context", context.model_dump(mode="json"))
+                if snapshot is not None:
+                    self._write_setting("loop_snapshot", snapshot.model_dump(mode="json"))
 
     def list_prompt_presets(self, project_root: Optional[str] = None) -> List[PromptPreset]:
         payload = self._get_setting("prompt_presets") or {"items": []}

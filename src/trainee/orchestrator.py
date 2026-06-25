@@ -11,9 +11,8 @@ from trainee.events import EventBus
 from trainee.executor import TrainingExecutor
 from trainee.ledger import LedgerExporter
 from trainee.logging import get_logger
-from trainee.models import AgentProgram, EventMessage, LoopSnapshot, ProjectBundle, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
+from trainee.models import EventMessage, LoopSnapshot, ProjectBundle, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
 from trainee.parsers import discover_wandb_summary, missing_required_metrics, parse_metrics_from_sources
-from trainee.program import DEFAULT_AGENT_PROGRAM, program_path, write_program
 from trainee.prompt_documents import PromptDocumentLoader
 from trainee.project_config import ProjectConfig, compile_project_spec, default_project_config, load_project_config, project_config_path
 from trainee.providers import provider_settings_payload
@@ -64,12 +63,19 @@ class RuntimeService:
         self.decision_engine = DecisionEngine(settings)
         self._launch_context_preview = None
 
-    async def register_project(self, spec: ProjectSpec) -> ProjectBundle:
+    def prepare_project_registration(self, spec: ProjectSpec) -> ProjectContext:
         self.executor.validate_paths(spec, self.settings.artifacts_dir)
-        context = self.context_builder.build(spec)
-        self.storage.save_project_spec(spec)
-        self.storage.save_project_context(context)
+        return self.context_builder.build(spec)
+
+    async def register_project(
+        self,
+        spec: ProjectSpec,
+        *,
+        context: Optional[ProjectContext] = None,
+    ) -> ProjectBundle:
+        context = context or self.prepare_project_registration(spec)
         snapshot = self.storage.get_loop_snapshot()
+        updated_snapshot: Optional[LoopSnapshot] = None
         if not self.loop_is_running():
             snapshot.status = "ready"
             snapshot.current_session_id = None
@@ -77,7 +83,8 @@ class RuntimeService:
             snapshot.current_round_index = 0
             snapshot.requested_stop = False
             snapshot.message = "Project registered and context built."
-            self.storage.save_loop_snapshot(snapshot)
+            updated_snapshot = snapshot
+        self.storage.save_project_registration(spec, context, updated_snapshot)
         await self._publish("project_registered", {"project_root": spec.project_root})
         return self.get_bundle()
 
@@ -85,39 +92,6 @@ class RuntimeService:
         self.storage.save_project_context(context)
         await self._publish("context_updated", {"warnings": context.warnings})
         return self.get_bundle()
-
-    def get_agent_program(self) -> AgentProgram:
-        project_root = self._program_project_root()
-        if project_root is None:
-            return AgentProgram(content=DEFAULT_AGENT_PROGRAM)
-        path = program_path(project_root)
-        document = next(
-            (
-                item
-                for item in self.prompt_document_loader.load(project_root)
-                if item.path == ".trainee/program.md"
-            ),
-            None,
-        )
-        return AgentProgram(
-            content=document.text if document else DEFAULT_AGENT_PROGRAM,
-            path=str(path),
-            exists=path.is_file(),
-        )
-
-    async def update_agent_program(self, content: str) -> AgentProgram:
-        project_root = self._program_project_root()
-        if project_root is None:
-            raise ValueError("register or launch a project before saving agent rules")
-        path = write_program(project_root, content)
-        document = next(
-            item
-            for item in self.prompt_document_loader.load(project_root)
-            if item.path == ".trainee/program.md"
-        )
-        program = AgentProgram(content=document.text, path=str(path), exists=True)
-        await self._publish("agent_program_updated", {"path": str(path)})
-        return program
 
     async def save_prompt_preset(
         self,
@@ -223,7 +197,6 @@ class RuntimeService:
             "spec": bundle.spec,
             "context": context,
             "context_is_preview": context_is_preview,
-            "agent_program": self.get_agent_program(),
             "project_config": project_config,
             "project_config_path": str(project_config_path(bundle.spec.project_root)) if bundle.spec else "",
             "loop": bundle.loop,
@@ -266,6 +239,7 @@ class RuntimeService:
             "artifacts_dir": str(self.settings.artifacts_dir),
             "config_path": str(self.settings.config_path),
             "global_config_path": str(self.settings.global_config_path),
+            "system_prompt": self.settings.system_prompt,
             "loop_running": self.loop_is_running(),
             **provider_settings_payload(self.settings),
         }
@@ -282,12 +256,6 @@ class RuntimeService:
 
         latest_session = self.storage.get_latest_session()
         return latest_session.id if latest_session else None
-
-    def _program_project_root(self) -> Optional[Path]:
-        spec = self.storage.get_project_spec()
-        if spec is not None:
-            return Path(spec.project_root).expanduser().resolve()
-        return self.settings.project_root
 
     def _launch_project_context_preview(self) -> ProjectContext:
         if self._launch_context_preview is None:
@@ -502,16 +470,13 @@ class RuntimeService:
                 if session.requested_stop:
                     await self._finish_session(session_id, "stopped", session.stop_reason or "Stop requested.")
                     return
-                if round_index >= spec.max_rounds:
-                    await self._finish_session(session_id, "stopped", "Reached max_rounds.")
-                    return
 
                 history = self.storage.list_research_rounds(session_id)
                 research_state = self.research_state_builder.build(spec, history)
                 prompt_documents = self.prompt_document_loader.load(spec.project_root)
                 snapshot = self.storage.get_loop_snapshot()
                 snapshot.status = "deciding"
-                snapshot.message = f"Generating decision for round {round_index + 1}."
+                snapshot.message = f"Evaluating round {round_index} and deciding the next action."
                 self.storage.save_loop_snapshot(snapshot)
 
                 decision_result = await self.decision_engine.decide_with_prompt(
@@ -540,11 +505,16 @@ class RuntimeService:
                 if decision.action == "stop":
                     await self._finish_session(session_id, "stopped", decision.reason)
                     return
+                if round_index >= spec.max_rounds:
+                    await self._finish_session(session_id, "stopped", "Reached max_rounds.")
+                    return
 
                 current_params = spec.merge_param_values(decision.next_params, base=current_params)
                 round_index += 1
         except Exception as exc:
-            await self._finish_session(session_id, "failed", str(exc))
+            message = f"{type(exc).__name__}: {exc}"
+            self._mark_active_round_failed(session_id, message)
+            await self._finish_session(session_id, "failed", message)
 
     async def _handle_heartbeat(self, session_id: int, round_id: int, round_index: int, payload: Dict[str, Any]) -> None:
         snapshot = self.storage.get_loop_snapshot()
@@ -585,6 +555,20 @@ class RuntimeService:
         except Exception:
             logger.exception("failed to write session report", extra={"_trainee_extra": {"session_id": session_id}})
         await self._publish("loop_finished", {"session_id": session_id, "status": status, "message": message})
+
+    def _mark_active_round_failed(self, session_id: int, message: str) -> None:
+        snapshot = self.storage.get_loop_snapshot()
+        if snapshot.active_round_id is None:
+            return
+        round_record = self.storage.get_round(snapshot.active_round_id)
+        if round_record is None or round_record.session_id != session_id:
+            return
+        if round_record.status != "running":
+            return
+        round_record.status = "failed"
+        round_record.end_time = utc_now()
+        round_record.error = message
+        self.storage.update_round(round_record)
 
     def _initial_params(self, spec: ProjectSpec) -> Dict[str, Any]:
         return spec.merge_param_values()

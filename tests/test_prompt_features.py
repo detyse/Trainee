@@ -5,6 +5,7 @@ import json
 import yaml
 
 from trainee.models import AgentTrace, RoundRecord, RunSession
+from trainee.settings import load_settings
 
 REGISTER_PAYLOAD_TEMPLATE = {
     "security_mode": "unsafe",
@@ -119,7 +120,7 @@ def test_prompt_preview_api_shows_model_request(runtime_env):
     assert payload["label"] == "Next decision preview based on saved project state"
     assert preview["status"] == "preview"
     assert preview["provider"] == "none"
-    assert preview["system_prompt"].startswith("# Trainee Agent Rules")
+    assert preview["system_prompt"].startswith("# Trainee System Prompt")
     assert "JSON only" in preview["system_prompt"]
     assert preview["user_prompt"].startswith("<STATIC_CONTEXT>\n")
     assert "\n</STATIC_CONTEXT>\n\n<DYNAMIC_ROUND_STATE>\n" in preview["user_prompt"]
@@ -129,7 +130,7 @@ def test_prompt_preview_api_shows_model_request(runtime_env):
     assert preview["dynamic_state_json"]["current_params"] == {"epochs": 2, "lr": 0.2}
 
 
-def test_agent_program_ui_updates_file_and_prompt_preview(runtime_env):
+def test_system_prompt_ui_updates_global_config_and_prompt_preview(runtime_env):
     client = runtime_env["client"]
     external_project = runtime_env["external_project"]
     python = runtime_env["python"]
@@ -140,25 +141,43 @@ def test_agent_program_ui_updates_file_and_prompt_preview(runtime_env):
     }
     assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
 
-    custom_rules = "# Project Rules\n\n- Prefer smaller learning-rate changes."
+    custom_prompt = "# Custom System Prompt\n\nReturn exactly the configured response."
     response = client.post(
-        "/ui/project/program",
-        data={"content": custom_rules},
+        "/ui/runtime/system-prompt",
+        data={"system_prompt": custom_prompt},
         headers={"HX-Request": "true"},
     )
 
     assert response.status_code == 200
-    program_path = external_project / ".trainee" / "program.md"
-    assert program_path.read_text(encoding="utf-8") == custom_rules + "\n"
-    program = client.get("/api/project/program").json()
-    assert program == {
-        "content": custom_rules + "\n",
-        "path": str(program_path),
-        "exists": True,
+    config_path = runtime_env["config_path"]
+    assert json.loads(config_path.read_text(encoding="utf-8"))["system_prompt"] == custom_prompt
+    assert not (external_project / ".trainee" / "program.md").exists()
+    payload = client.get("/api/runtime/system-prompt").json()
+    assert payload == {
+        "system_prompt": custom_prompt,
+        "config_path": str(config_path),
     }
+    reloaded = load_settings(repo_root=external_project, global_config_path=config_path)
+    assert reloaded.system_prompt == custom_prompt
+    assert client.get("/api/project/program").status_code == 404
+    assert client.post("/api/project/program", json={"content": "legacy"}).status_code == 404
     preview = client.get("/api/prompt-preview").json()["prompt_preview"]
-    assert preview["system_prompt"].startswith(custom_rules)
-    assert "Runtime response contract: Respond with JSON only." in preview["system_prompt"]
+    assert preview["system_prompt"] == custom_prompt
+    assert "Runtime response contract" not in preview["system_prompt"]
+
+
+def test_system_prompt_rejects_blank_and_running_loop_updates(runtime_env, monkeypatch):
+    client = runtime_env["client"]
+    runtime = client.app.state.runtime
+
+    response = client.post("/api/runtime/system-prompt", json={"system_prompt": "   "})
+    assert response.status_code == 400
+    assert "cannot be blank" in response.json()["detail"]
+
+    monkeypatch.setattr(runtime, "loop_is_running", lambda: True)
+    response = client.post("/api/runtime/system-prompt", json={"system_prompt": "new prompt"})
+    assert response.status_code == 409
+    assert "stop the loop" in response.json()["detail"]
 
 
 def test_runtime_provider_settings_save_to_config_json(runtime_env):

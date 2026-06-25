@@ -30,7 +30,7 @@ trainee = "trainee.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-trainee = ["templates/**/*.html", "static/*.css"]
+trainee = ["defaults/*.txt", "templates/**/*.html", "static/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

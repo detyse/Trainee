@@ -19,7 +19,7 @@ from starlette.datastructures import FormData
 
 from trainee.events import EventBus
 from trainee.logging import configure_logging, get_logger
-from trainee.models import AgentProgramUpdate, ProjectContext, ProjectSpec, PromptPreset
+from trainee.models import ProjectContext, ProjectSpec, PromptPreset
 from trainee.orchestrator import RuntimeService
 from trainee.project_config import (
     AdvancedConfig,
@@ -32,7 +32,10 @@ from trainee.project_config import (
     RunConfig,
     TuningConfig,
     compile_project_spec,
+    normalized_project_config,
+    project_config_path,
     project_config_from_spec,
+    restore_project_config,
     save_project_config,
 )
 from trainee.providers import (
@@ -47,6 +50,7 @@ from trainee.providers import (
     DEFAULT_OPENAI_MODEL,
     AgentDebugSettingsUpdate,
     ProviderSettingsUpdate,
+    SystemPromptUpdate,
     active_model,
     build_provider_config_payload,
     provider_is_configured,
@@ -54,7 +58,7 @@ from trainee.providers import (
     provider_update_from_form,
 )
 from trainee.reporter import ReportGenerator
-from trainee.settings import Settings, load_settings, save_provider_config
+from trainee.settings import Settings, load_settings, save_global_config
 from trainee.storage import ImageAnalysisLimitExceeded, Storage
 
 MAX_LLM_TEST_IMAGE_BYTES = 5 * 1024 * 1024
@@ -204,10 +208,8 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 legacy_spec = ProjectSpec.model_validate(payload)
                 project_root = Path(legacy_spec.project_root).expanduser().resolve()
                 config = project_config_from_spec(legacy_spec)
-            save_project_config(project_root, config)
-            spec = compile_project_spec(project_root, config)
-            bundle = await runtime.register_project(spec)
-        except ValueError as exc:
+            bundle = await _register_project_config(runtime, project_root, config)
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(bundle.model_dump(mode="json"))
 
@@ -217,19 +219,32 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         bundle = await runtime.update_project_context(context)
         return JSONResponse(bundle.model_dump(mode="json"))
 
-    @app.get("/api/project/program")
-    async def api_get_agent_program(request: Request) -> JSONResponse:
+    @app.get("/api/runtime/system-prompt")
+    async def api_get_system_prompt(request: Request) -> JSONResponse:
         runtime = get_runtime(request)
-        return JSONResponse(runtime.get_agent_program().model_dump(mode="json"))
+        return JSONResponse(
+            {
+                "system_prompt": runtime.settings.system_prompt,
+                "config_path": str(runtime.settings.global_config_path),
+            }
+        )
 
-    @app.post("/api/project/program")
-    async def api_update_agent_program(request: Request, update: AgentProgramUpdate) -> JSONResponse:
+    @app.post("/api/runtime/system-prompt")
+    async def api_update_system_prompt(request: Request, update: SystemPromptUpdate) -> JSONResponse:
         runtime = get_runtime(request)
         try:
-            program = await runtime.update_agent_program(update.content)
-        except (OSError, ValueError) as exc:
+            updated_settings = _update_system_prompt_settings(request, runtime, update.system_prompt)
+        except OSError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(program.model_dump(mode="json"))
+        except ValueError as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "system_prompt": updated_settings.system_prompt,
+                "config_path": str(updated_settings.global_config_path),
+            }
+        )
 
     @app.get("/api/project")
     async def api_get_project(request: Request) -> JSONResponse:
@@ -423,10 +438,8 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         form = await request.form()
         try:
             project_root, config = _project_config_from_form(form)
-            save_project_config(project_root, config)
-            spec = compile_project_spec(project_root, config)
-            await runtime.register_project(spec)
-        except ValueError as exc:
+            await _register_project_config(runtime, project_root, config)
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
@@ -436,9 +449,10 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         form = await request.form()
         try:
             project_root, config = _project_config_from_form(form)
-            save_project_config(project_root, config)
-            spec = compile_project_spec(project_root, config)
-            await runtime.register_project(spec)
+            bundle = await _register_project_config(runtime, project_root, config)
+            spec = bundle.spec
+            if spec is None:
+                raise ValueError("project registration did not produce a project spec")
             preset_id = _form_str(form, "prompt_preset_id")
             preset_name = _form_str(form, "prompt_preset_name")
             if not preset_name and preset_id:
@@ -451,7 +465,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 project_root=spec.project_root,
                 preset_id=preset_id or None,
             )
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
@@ -469,10 +483,8 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             project_root, config = _project_config_from_form(form)
             config.metrics.prompt = preset.metric_prompt
             config.advanced.tuning_prompt = preset.tuning_prompt
-            save_project_config(project_root, config)
-            spec = compile_project_spec(project_root, config)
-            await runtime.register_project(spec)
-        except ValueError as exc:
+            await _register_project_config(runtime, project_root, config)
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
@@ -498,16 +510,19 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         await runtime.update_project_context(context)
         return await _render_refresh_response(request, templates, runtime)
 
-    @app.post("/ui/project/program")
-    async def ui_update_agent_program(
+    @app.post("/ui/runtime/system-prompt")
+    async def ui_update_system_prompt(
         request: Request,
-        content: str = Form(""),
+        system_prompt: str = Form(""),
     ) -> HTMLResponse:
         runtime = get_runtime(request)
         try:
-            await runtime.update_agent_program(content)
-        except (OSError, ValueError) as exc:
+            _update_system_prompt_settings(request, runtime, system_prompt)
+        except OSError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
 
     @app.post("/ui/runtime/provider")
@@ -599,7 +614,7 @@ def _update_provider_settings(
     if runtime.loop_is_running():
         raise ValueError("stop the loop before changing provider settings")
     provider_payload = build_provider_config_payload(update)
-    save_provider_config(runtime.settings.global_config_path, provider_payload)
+    save_global_config(runtime.settings.global_config_path, provider_payload)
     updated_settings = load_settings(
         repo_root=runtime.settings.repo_root,
         data_dir=runtime.settings.data_dir,
@@ -618,9 +633,33 @@ def _update_agent_debug_settings(
 ) -> Settings:
     if runtime.loop_is_running():
         raise ValueError("stop the loop before changing Agent Debug settings")
-    save_provider_config(
+    save_global_config(
         runtime.settings.global_config_path,
         {"agent_debug_enabled": enabled},
+    )
+    updated_settings = load_settings(
+        repo_root=runtime.settings.repo_root,
+        data_dir=runtime.settings.data_dir,
+        project_root=runtime.settings.project_root,
+        global_config_path=runtime.settings.global_config_path,
+    )
+    request.app.state.settings = updated_settings
+    runtime.update_settings(updated_settings)
+    return updated_settings
+
+
+def _update_system_prompt_settings(
+    request: Request,
+    runtime: RuntimeService,
+    system_prompt: str,
+) -> Settings:
+    if runtime.loop_is_running():
+        raise ValueError("stop the loop before changing the system prompt")
+    if not system_prompt.strip():
+        raise ValueError("system_prompt cannot be blank")
+    save_global_config(
+        runtime.settings.global_config_path,
+        {"system_prompt": system_prompt},
     )
     updated_settings = load_settings(
         repo_root=runtime.settings.repo_root,
@@ -649,6 +688,24 @@ def _health_payload(request: Request) -> Dict[str, Any]:
         "llm_provider": runtime.settings.llm_provider,
         "db_ok": db_ok,
     }
+
+
+async def _register_project_config(
+    runtime: RuntimeService,
+    project_root: Path,
+    config: ProjectConfig,
+):
+    normalized = normalized_project_config(project_root, config)
+    spec = compile_project_spec(project_root, normalized)
+    context = runtime.prepare_project_registration(spec)
+    path = project_config_path(project_root)
+    previous = path.read_bytes() if path.is_file() else None
+    try:
+        save_project_config(project_root, normalized)
+        return await runtime.register_project(spec, context=context)
+    except Exception:
+        restore_project_config(project_root, previous)
+        raise
 
 
 def _project_config_from_form(form: FormData) -> tuple[Path, ProjectConfig]:
@@ -702,6 +759,7 @@ def _project_config_from_form(form: FormData) -> tuple[Path, ProjectConfig]:
             environment=_form_str(form, "launch_environment", "system"),
             env_name=_form_str(form, "launch_env_name") or None,
             command=command,
+            baseline_config=_form_str(form, "baseline_config") or None,
             args=_parse_arg_lines(_form_str(form, "launch_args_lines")),
         ),
         run=RunConfig(

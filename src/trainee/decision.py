@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -29,6 +30,13 @@ class ProviderCompletion:
     request_id: Optional[str] = None
     usage: Optional[dict[str, Any]] = None
     finish_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ParamAdjustment:
+    name: str
+    before: Any
+    after: Any
 
 
 class ProviderCallError(RuntimeError):
@@ -102,6 +110,7 @@ class DecisionEngine:
             research_state=research_state,
             current_params=current_params,
             prompt_documents=prompt_documents,
+            system_prompt=self.settings.system_prompt,
         )
         prompt_preview = self._build_prompt_preview(envelope, status="not_sent")
         agent_trace: Optional[AgentTrace] = None
@@ -202,6 +211,7 @@ class DecisionEngine:
             research_state=research_state,
             current_params=current_params,
             prompt_documents=prompt_documents,
+            system_prompt=self.settings.system_prompt,
         )
         return self._build_prompt_preview(envelope, status=status)
 
@@ -587,28 +597,38 @@ class DecisionEngine:
             )
 
         next_params = dict(current_params)
-        numeric_params = [param for param in spec.tunable_params if param.type in {"int", "float"}]
-        target_param = self._pick_target_param(numeric_params)
         previous = self._previous_round(research_state)
         improved = self._improved_over_previous(research_state, latest, previous)
         hypothesis = ""
         change_summary = ""
         expected_effect = ""
 
-        if target_param is not None and (previous is None or not improved):
-            before = target_param.normalize_value(next_params.get(target_param.name, target_param.default))
-            if target_param.type == "int":
-                step = -1 if research_state.primary_metric_goal == "min" else 1
-                candidate = int(before) + step
-            else:
-                factor = 0.8 if research_state.primary_metric_goal == "min" else 1.2
-                candidate = float(before) * factor
-            after = target_param.normalize_value(candidate)
-            next_params[target_param.name] = after
-            hypothesis = f"Adjusting {target_param.name} may improve {metric_name}."
-            change_summary = f"Set {target_param.name} from {before} to {after}."
+        if previous is None or not improved:
+            adjustment = self._safe_heuristic_adjustment(
+                spec,
+                next_params,
+                research_state.primary_metric_goal,
+            )
+            if adjustment is None:
+                return AgentDecision(
+                    action="stop",
+                    next_params=spec.merge_param_values(base=current_params),
+                    reason=(
+                        "Heuristic fallback could not find a safe numeric tunable parameter "
+                        "to adjust. Check that numeric tunable params have defaults and usable bounds."
+                    ),
+                    focus_metrics=[metric_name],
+                    latest_round_judgement=judgement,
+                    compare_to_baseline=self._comparison_text("baseline", latest, research_state.baseline_round),
+                    compare_to_best=self._comparison_text("best", latest, research_state.best_so_far_round),
+                    avoid_repeating=research_state.rejected_change_signatures,
+                    confidence=0.2,
+                )
+            next_params[adjustment.name] = adjustment.after
+            hypothesis = f"Adjusting {adjustment.name} may improve {metric_name}."
+            change_summary = f"Set {adjustment.name} from {adjustment.before} to {adjustment.after}."
             expected_effect = f"Improve {metric_name} while keeping other configured metrics stable."
-            reason = f"Heuristic fallback adjusted {target_param.name} after observing {metric_name}={metric_value}."
+            reason = f"Heuristic fallback adjusted {adjustment.name} after observing {metric_name}={metric_value}."
         else:
             reason = f"Heuristic fallback kept parameters unchanged because {metric_name} showed acceptable progress."
 
@@ -626,6 +646,67 @@ class DecisionEngine:
             avoid_repeating=research_state.rejected_change_signatures,
             confidence=0.25,
         )
+
+    def _safe_heuristic_adjustment(
+        self,
+        spec: ProjectSpec,
+        current_params: dict[str, Any],
+        goal: str,
+    ) -> Optional[ParamAdjustment]:
+        for param in self._ordered_numeric_params(spec):
+            if param.name in current_params:
+                raw_before = current_params[param.name]
+            elif param.default is not None:
+                raw_before = param.default
+            else:
+                continue
+
+            try:
+                before = param.normalize_value(raw_before)
+                candidate = self._next_numeric_candidate(param, before, goal)
+                after = param.normalize_value(candidate)
+            except (OverflowError, TypeError, ValueError):
+                continue
+
+            if after == before:
+                continue
+            return ParamAdjustment(name=param.name, before=before, after=after)
+        return None
+
+    def _ordered_numeric_params(self, spec: ProjectSpec) -> list[Any]:
+        numeric_params = [param for param in spec.tunable_params if param.type in {"int", "float"}]
+        preferred = self._pick_target_param(numeric_params)
+        if preferred is None:
+            return []
+        return [preferred, *[param for param in numeric_params if param is not preferred]]
+
+    def _next_numeric_candidate(self, param: Any, before: Any, goal: str) -> Any:
+        if param.type == "int":
+            step = -1 if goal == "min" else 1
+            candidate = int(before) + step
+            if param.min_value is not None:
+                candidate = max(candidate, math.ceil(param.min_value))
+            if param.max_value is not None:
+                candidate = min(candidate, math.floor(param.max_value))
+            return candidate
+
+        current = float(before)
+        if not math.isfinite(current):
+            raise ValueError(f"non-finite value for {param.name}: {before}")
+        factor = 0.8 if goal == "min" else 1.2
+        candidate = current * factor
+        if candidate == current:
+            if goal == "min" and param.min_value is not None and current > param.min_value:
+                candidate = (current + param.min_value) / 2
+            elif goal == "max" and param.max_value is not None and current < param.max_value:
+                candidate = (current + param.max_value) / 2
+        if param.min_value is not None:
+            candidate = max(candidate, param.min_value)
+        if param.max_value is not None:
+            candidate = min(candidate, param.max_value)
+        if not math.isfinite(candidate):
+            raise ValueError(f"non-finite candidate for {param.name}: {candidate}")
+        return candidate
 
     def _pick_target_param(self, numeric_params: list[Any]) -> Any:
         for param in numeric_params:

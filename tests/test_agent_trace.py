@@ -55,7 +55,7 @@ def _decision_inputs(tmp_path: Path) -> tuple[ProjectSpec, ProjectContext, list[
             MetricSpec(
                 name="total_loss",
                 source="log_regex",
-                key_or_pattern="total_loss",
+                key_or_pattern=r"total_loss=(?P<value>-?\d+(?:\.\d+)?)",
                 goal="min",
                 required=True,
             )

@@ -96,9 +96,23 @@ class ResearchStateBuilder:
             return spec.metric_specs[0]
         for name in ("total_loss", "loss"):
             if any(self._numeric(item.metrics.get(name)) is not None for item in rounds):
-                return MetricSpec(name=name, key_or_pattern=name, goal="min", required=False)
+                return MetricSpec(
+                    name=name,
+                    key_or_pattern=r"(?P<value>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)",
+                    goal="min",
+                    required=False,
+                )
         names = sorted({name for item in rounds for name in item.metrics})
-        return MetricSpec(name=names[0], key_or_pattern=names[0], goal="min", required=False) if names else None
+        return (
+            MetricSpec(
+                name=names[0],
+                key_or_pattern=r"(?P<value>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)",
+                goal="min",
+                required=False,
+            )
+            if names
+            else None
+        )
 
     def metric_value(self, record: RoundRecord, metric: Optional[MetricSpec]) -> Optional[float]:
         if metric is None:

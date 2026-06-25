@@ -18,6 +18,10 @@ def test_tool_manifest_exposes_tool_call_safe_names():
     assert "loop_start" in names
     assert "runs_get" in names
     assert "runtime_debug_update" in names
+    assert "runtime_system_prompt_get" in names
+    assert "runtime_system_prompt_update" in names
+    assert "project_get_program" not in names
+    assert "project_update_program" not in names
     assert all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names)
 
     register_tool = next(item for item in tools if item["function"]["name"] == "project_register")
@@ -57,16 +61,14 @@ def test_init_project_initializes_project_files(tmp_path):
     trainee_dir = project / ".trainee"
     project_yaml = yaml.safe_load((trainee_dir / "project.yaml").read_text(encoding="utf-8"))
     context_md = (trainee_dir / "context.md").read_text(encoding="utf-8")
-    program_md = (trainee_dir / "program.md").read_text(encoding="utf-8")
     assert project_yaml["launch"]["command"] == ["python", "train.py"]
-    assert project_yaml["launch"]["args"] == [{"flag": "--config", "value": "config.yaml"}]
+    assert project_yaml["launch"]["baseline_config"] is None
+    assert project_yaml["launch"]["args"] == []
     assert project_yaml["advanced"]["security_mode"] == "guarded"
     assert project_yaml["advanced"]["log_paths"] == [".trainee/logs/**/*.log", ".trainee/runs/**/*.log"]
     assert "Toy Model" in context_md
-    assert "# Trainee Agent Rules" in program_md
-    assert "Change only parameters listed in `tunable_params`." in program_md
+    assert not (trainee_dir / "program.md").exists()
     assert trainee_dir / "project.yaml" in result["files_written"]
-    assert trainee_dir / "program.md" in result["files_written"]
     assert project / "README.md" in result["files_read"]
     assert result["already_initialized"] is False
 
@@ -88,14 +90,13 @@ def test_init_project_detects_initialized_project_and_keeps_files(tmp_path):
     assert set(result["files_skipped"]) == {
         trainee_dir / "project.yaml",
         trainee_dir / "context.md",
-        trainee_dir / "program.md",
         trainee_dir / "README.md",
     }
     assert (trainee_dir / "project.yaml").read_text(encoding="utf-8") == project_yaml
     assert (trainee_dir / "program.md").read_text(encoding="utf-8") == "custom rules\n"
 
 
-def test_init_project_adds_program_to_existing_project_without_overwriting_other_files(tmp_path):
+def test_init_project_does_not_create_program_for_existing_project(tmp_path):
     project = tmp_path / "toymodel"
     trainee_dir = project / ".trainee"
     trainee_dir.mkdir(parents=True)
@@ -106,9 +107,9 @@ def test_init_project_adds_program_to_existing_project_without_overwriting_other
 
     result = init_project(project)
 
-    assert result["files_written"] == [trainee_dir / "program.md"]
+    assert result["files_written"] == []
     assert (trainee_dir / "project.yaml").read_text(encoding="utf-8") == project_yaml
-    assert "# Trainee Agent Rules" in (trainee_dir / "program.md").read_text(encoding="utf-8")
+    assert not (trainee_dir / "program.md").exists()
 
 
 def test_init_command_prints_agent_style_activity(tmp_path, capsys):
@@ -126,7 +127,7 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     assert "- Status: initialized new project files" in output
     assert "- Read: train.py" in output
     assert "- Wrote: .trainee/project.yaml" in output
-    assert "- Wrote: .trainee/program.md" in output
+    assert "- Wrote: .trainee/program.md" not in output
     assert "Discovery" in output
     assert "- Environment: system" in output
     assert "- Entrypoints: train.py" in output
@@ -137,7 +138,8 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     assert "- Security: guarded" in output
     assert "- Budget: max_rounds=3, timeout=60 minutes" in output
     assert "- Data inputs: data" in output
-    assert "- Launch arguments: --config=config.yaml" in output
+    assert "- Baseline config: not set" in output
+    assert "- Launch arguments: none" in output
     assert "- Fixed arguments: none" in output
     assert "- Tunable parameters: none" in output
     assert "- Metrics: none (built-in loss/total_loss parsing only)" in output
@@ -147,11 +149,34 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
         "sources=stdout; log_file_mtime(.trainee/logs/**/*.log, .trainee/runs/**/*.log)"
     ) in output
     assert "- Log paths: .trainee/logs/**/*.log, .trainee/runs/**/*.log" in output
-    assert "- Launcher: python train.py --config config.yaml {extra_args}" in output
-    assert "- Review: .trainee/project.yaml, .trainee/context.md, and .trainee/program.md" in output
+    assert "- Launcher: python train.py {extra_args}" in output
+    assert "- Review: .trainee/project.yaml and .trainee/context.md" in output
     assert "- Validate: trainee doctor or trainee run --dry-run" in output
     assert "- Next: edit .trainee/project.yaml, run `trainee doctor`, then run `trainee run`" in output
     assert "uvicorn" not in output.lower()
+
+
+def test_init_command_sets_explicit_baseline_config(tmp_path, capsys):
+    project = tmp_path / "toymodel"
+    (project / "configs").mkdir(parents=True)
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (project / "configs" / "base.yaml").write_text("lr: 0.001\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "init",
+            str(project),
+            "--baseline-config",
+            "configs/base.yaml",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
+    assert payload["launch"]["baseline_config"] == "configs/base.yaml"
+    output = capsys.readouterr().out
+    assert "- Baseline config: configs/base.yaml" in output
+    assert f"- Launcher: python train.py --config {project}/configs/base.yaml {{extra_args}}" in output
 
 
 def test_init_command_reports_already_initialized_project(tmp_path, capsys):
@@ -214,7 +239,7 @@ def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.1.0\nLast updated: 2026-06-25\n"
+    assert capsys.readouterr().out == "Trainee 0.1.0\nLast updated: 2026-06-25 13:09:19 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):

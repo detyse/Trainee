@@ -152,7 +152,7 @@ def test_loop_runs_two_rounds_and_collects_metrics(runtime_env, wait_for):
     session_id = runs_payload["sessions"][0]["id"]
     assert len(rounds) == 2
     assert rounds[0]["metrics"]["total_loss"] > 0
-    assert rounds[1]["agent_decision"]["action"] in {"continue", "stop"}
+    assert all(item["agent_decision"]["action"] in {"continue", "stop"} for item in rounds)
     assert any("wandb.ai" in (item.get("wandb_run_url") or "") for item in rounds)
 
     detail_html = client.get(f"/fragments/run-detail?run_id={rounds[0]['id']}")

@@ -284,14 +284,32 @@ def _check_launcher(project_root: Path, spec: ProjectSpec | None) -> DoctorSecti
         return section
 
     entrypoint = _detect_train_entrypoint(launcher)
-    if entrypoint:
-        entrypoint_path = Path(entrypoint)
-        if not entrypoint_path.is_absolute():
-            entrypoint_path = project_root / entrypoint_path
+    working_dir = Path(spec.working_dir).expanduser().resolve()
+    if entrypoint and entrypoint.kind == "script":
+        entrypoint_path = _resolve_launcher_path(
+            entrypoint.value,
+            project_root=project_root,
+            working_dir=working_dir,
+        )
         if entrypoint_path.is_file():
-            section.add("ok", f"train entrypoint: {entrypoint}")
+            section.add("ok", f"train entrypoint: {entrypoint.value}")
         else:
-            section.add("fail", f"train entrypoint not found: {entrypoint}", fix="edit launch.command in .trainee/project.yaml")
+            section.add(
+                "fail",
+                f"train entrypoint not found: {entrypoint.value}",
+                fix="edit launch.command in .trainee/project.yaml",
+            )
+    elif entrypoint and entrypoint.kind == "module":
+        module_paths = _local_module_paths(working_dir, entrypoint.value)
+        if any(path.is_file() for path in module_paths):
+            section.add("ok", f"train module: {entrypoint.value}")
+        else:
+            section.add(
+                "warn",
+                f"train module is not local and must be installed in the selected environment: {entrypoint.value}",
+            )
+    elif entrypoint and entrypoint.error:
+        section.add("fail", entrypoint.error, fix="edit launch.command in .trainee/project.yaml")
     else:
         section.add("fail", "train entrypoint not detected", fix="edit launch.command in .trainee/project.yaml")
 
@@ -443,15 +461,79 @@ def _conda_env_exists(conda: str, env_name: str) -> bool:
     return any(Path(item).name == env_name for item in envs if isinstance(item, str))
 
 
-def _detect_train_entrypoint(launcher: str) -> str:
+@dataclass(frozen=True)
+class _TrainEntrypoint:
+    kind: Literal["script", "module", "invalid"]
+    value: str = ""
+    error: str = ""
+
+
+def _detect_train_entrypoint(launcher: str) -> _TrainEntrypoint | None:
     try:
         tokens = shlex.split(launcher)
     except ValueError:
         tokens = launcher.split()
+
+    for index, token in enumerate(tokens):
+        if not _is_python_executable(token):
+            continue
+        cursor = index + 1
+        while cursor < len(tokens):
+            option = tokens[cursor]
+            if option in {"-u", "-O", "-OO", "-B", "-E", "-s", "-S", "-v", "-V", "-q", "-I"}:
+                cursor += 1
+                continue
+            if option in {"-W", "-X"}:
+                cursor += 2
+                continue
+            break
+        if cursor >= len(tokens):
+            return _TrainEntrypoint(
+                kind="invalid",
+                error="python launcher has no script or module entrypoint",
+            )
+        if tokens[cursor] == "-m":
+            if cursor + 1 >= len(tokens):
+                return _TrainEntrypoint(
+                    kind="invalid",
+                    error="python -m launcher is missing a module name",
+                )
+            module = tokens[cursor + 1]
+            if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", module):
+                return _TrainEntrypoint(
+                    kind="invalid",
+                    error=f"invalid python module entrypoint: {module}",
+                )
+            return _TrainEntrypoint(kind="module", value=module)
+        if tokens[cursor].endswith((".py", ".sh")):
+            return _TrainEntrypoint(kind="script", value=tokens[cursor])
+        return _TrainEntrypoint(
+            kind="invalid",
+            error=f"python launcher entrypoint is not a script or module: {tokens[cursor]}",
+        )
+
     for token in tokens:
         if token.endswith((".py", ".sh")):
-            return token
-    return ""
+            return _TrainEntrypoint(kind="script", value=token)
+    return None
+
+
+def _is_python_executable(token: str) -> bool:
+    name = Path(token).name
+    return re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", name) is not None
+
+
+def _resolve_launcher_path(value: str, *, project_root: Path, working_dir: Path) -> Path:
+    rendered = value.replace("{project_root}", str(project_root)).replace("{working_dir}", str(working_dir))
+    path = Path(rendered).expanduser()
+    if not path.is_absolute():
+        path = working_dir / path
+    return path.resolve()
+
+
+def _local_module_paths(working_dir: Path, module: str) -> tuple[Path, Path]:
+    module_path = working_dir.joinpath(*module.split("."))
+    return module_path.with_suffix(".py"), module_path / "__main__.py"
 
 
 def _suspicious_shell_operators(launcher: str) -> list[str]:

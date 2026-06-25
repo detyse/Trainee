@@ -149,7 +149,10 @@ def _extract_last_match(pattern: re.Pattern[str], text: str) -> Optional[float]:
     if "value" in match.groupdict():
         candidate = match.group("value")
     else:
-        candidate = match.group(1)
+        try:
+            candidate = match.group(1)
+        except IndexError:
+            return None
     try:
         return float(candidate)
     except (TypeError, ValueError):

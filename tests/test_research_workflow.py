@@ -18,7 +18,7 @@ from trainee.research_state import ResearchStateBuilder
 from trainee.storage import Storage
 
 
-def test_prompt_documents_load_context_md(tmp_path: Path) -> None:
+def test_prompt_documents_ignore_legacy_program_md(tmp_path: Path) -> None:
     project = tmp_path / "project"
     (project / ".trainee").mkdir(parents=True)
     (project / "context.md").write_text("root context\n", encoding="utf-8")
@@ -28,7 +28,6 @@ def test_prompt_documents_load_context_md(tmp_path: Path) -> None:
 
     assert [(item.path, item.kind, item.priority) for item in documents] == [
         ("context.md", "project_context", 100),
-        (".trainee/program.md", "agent_rules", 200),
     ]
     assert documents[0].digest == hashlib.sha256(b"root context\n").hexdigest()
 
@@ -39,8 +38,8 @@ def test_prompt_assembler_keeps_static_before_dynamic(tmp_path: Path) -> None:
     state = ResearchStateBuilder().build(spec, [])
     assembler = PromptAssembler()
 
-    first = assembler.assemble(spec, context, state, {"lr": 0.2}, [])
-    second = assembler.assemble(spec, context, state, {"lr": 0.1}, [])
+    first = assembler.assemble(spec, context, state, {"lr": 0.2}, [], "system prompt")
+    second = assembler.assemble(spec, context, state, {"lr": 0.1}, [], "system prompt")
 
     assert first.user_prompt.startswith("<STATIC_CONTEXT>\n")
     assert "\n</STATIC_CONTEXT>\n\n<DYNAMIC_ROUND_STATE>\n" in first.user_prompt
@@ -168,6 +167,106 @@ def test_runtime_decision_receives_research_state(runtime_env, wait_for) -> None
     assert isinstance(captured["prompt_documents"], list)
 
 
+def test_final_round_records_decision_and_rejected_signature(runtime_env, wait_for) -> None:
+    client = runtime_env["client"]
+    runtime = client.app.state.runtime
+    external_project = runtime_env["external_project"]
+    python = runtime_env["python"]
+    decisions = [
+        AgentDecision(
+            action="continue",
+            next_params={"lr": 0.1},
+            reason="test lower lr",
+            hypothesis="Lower lr may help.",
+            change_summary="Set lr from 0.2 to 0.1.",
+            latest_round_judgement="baseline",
+        ),
+        AgentDecision(
+            action="continue",
+            next_params={"lr": 0.05},
+            reason="the final experiment was worse",
+            latest_round_judgement="worse",
+        ),
+    ]
+
+    async def fake_decide_with_prompt(**kwargs):
+        return DecisionResult(decision=decisions.pop(0))
+
+    runtime.decision_engine.decide_with_prompt = fake_decide_with_prompt
+    registration = {
+        "project_root": str(external_project),
+        "version": 1,
+        "data": [],
+        "launch": {
+            "environment": "system",
+            "command": ["python", "train.py"],
+            "args": [],
+        },
+        "run": {
+            "max_rounds": 2,
+            "timeout_minutes": None,
+            "fixed_args": [],
+        },
+        "tuning": {
+            "params": [
+                {
+                    "name": "lr",
+                    "flag": "--lr",
+                    "type": "float",
+                    "default": 0.2,
+                    "min_value": 0.05,
+                    "max_value": 0.4,
+                }
+            ]
+        },
+        "metrics": {
+            "specs": [
+                {
+                    "name": "total_loss",
+                    "source": "log_regex",
+                    "key_or_pattern": r"total_loss=(?P<value>-?\d+(?:\.\d+)?)",
+                    "goal": "min",
+                    "required": True,
+                }
+            ],
+            "prompt": "",
+        },
+        "advanced": {
+            "security_mode": "unsafe",
+            "working_dir": str(external_project),
+            "heartbeat_interval_sec": 0.1,
+            "stall_timeout_sec": 1.5,
+            "signal_sources": [],
+            "log_paths": [],
+            "shell_command": (
+                f"{python} {{project_root}}/train.py "
+                "--log-file {project_root}/logs/final-decision.log"
+            ),
+        },
+    }
+
+    assert client.post("/api/project/register", json=registration).status_code == 200
+    assert client.post("/api/loop/start").status_code == 200
+    wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
+
+    runs_payload = client.get("/api/runs").json()
+    rounds_by_index = {item["round_index"]: item for item in runs_payload["rounds"]}
+    assert set(rounds_by_index) == {1, 2}
+    assert rounds_by_index[2]["agent_decision"]["latest_round_judgement"] == "worse"
+    assert runs_payload["sessions"][0]["stop_reason"] == "Reached max_rounds."
+
+    session_id = runs_payload["sessions"][0]["id"]
+    state_path = (
+        runtime_env["data_dir"]
+        / "artifacts"
+        / f"session-{session_id:04d}"
+        / "research_state.json"
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["latest_round"]["latest_round_judgement"] == "worse"
+    assert state["latest_round"]["change_signature"] in state["rejected_change_signatures"]
+
+
 def test_ledger_exports_each_round(tmp_path: Path) -> None:
     spec = _spec(tmp_path)
     output_dir = tmp_path / "artifacts"
@@ -277,7 +376,7 @@ def _spec(project_root: Path) -> ProjectSpec:
             MetricSpec(
                 name="total_loss",
                 source="log_regex",
-                key_or_pattern="total_loss",
+                key_or_pattern=r"total_loss=(?P<value>-?\d+(?:\.\d+)?)",
                 goal="min",
                 required=True,
             )

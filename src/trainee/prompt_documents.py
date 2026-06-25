@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-PromptDocumentKind = Literal["project_context", "agent_rules", "constraints", "notes"]
+PromptDocumentKind = Literal["project_context", "constraints", "notes"]
 
 
 class PromptDocument(BaseModel):
@@ -21,10 +21,8 @@ class PromptDocument(BaseModel):
 class PromptDocumentLoader:
     _DOCUMENTS = (
         ("context.md", "project_context", 100),
-        ("program.md", "agent_rules", 100),
         ("constraints.md", "constraints", 100),
         (".trainee/context.md", "project_context", 200),
-        (".trainee/program.md", "agent_rules", 200),
     )
 
     def load(self, project_root: str | Path) -> list[PromptDocument]:

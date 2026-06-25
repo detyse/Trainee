@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -43,7 +45,16 @@ class LaunchConfig(BaseModel):
     environment: LaunchEnvironment = "system"
     env_name: Optional[str] = None
     command: list[str] = Field(default_factory=list)
+    baseline_config: Optional[str] = None
     args: list[CommandArg] = Field(default_factory=list)
+
+    @field_validator("baseline_config")
+    @classmethod
+    def normalize_baseline_config(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     @model_validator(mode="after")
     def validate_environment(self) -> "LaunchConfig":
@@ -137,14 +148,57 @@ def load_project_config(project_root: str | Path) -> ProjectConfig:
 
 
 def save_project_config(project_root: str | Path, config: ProjectConfig) -> Path:
-    path = project_config_path(project_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = config.model_dump(mode="json", exclude_none=True)
-    path.write_text(
-        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True, default_flow_style=False),
-        encoding="utf-8",
+    root = Path(project_root).expanduser().resolve()
+    path = project_config_path(root)
+    normalized = normalized_project_config(root, config)
+    _atomic_write(
+        path,
+        render_project_config_yaml(normalized).encode("utf-8"),
     )
     return path
+
+
+def restore_project_config(project_root: str | Path, previous: Optional[bytes]) -> None:
+    path = project_config_path(project_root)
+    if previous is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    _atomic_write(path, previous)
+
+
+def render_project_config_yaml(config: ProjectConfig) -> str:
+    payload = config.model_dump(mode="json", exclude_none=True)
+    launch = config.launch.model_dump(mode="json", exclude_none=True)
+    launch_payload: dict[str, Any] = {
+        "environment": launch["environment"],
+    }
+    if "env_name" in launch:
+        launch_payload["env_name"] = launch["env_name"]
+    launch_payload["command"] = launch["command"]
+    launch_payload["baseline_config"] = config.launch.baseline_config
+    launch_payload["args"] = launch["args"]
+    payload["launch"] = launch_payload
+    return yaml.safe_dump(
+        payload,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+
+
+def normalized_project_config(project_root: str | Path, config: ProjectConfig) -> ProjectConfig:
+    root = Path(project_root).expanduser().resolve()
+    baseline_config = _normalize_baseline_config_path(root, config.launch.baseline_config)
+    return config.model_copy(
+        update={
+            "launch": config.launch.model_copy(
+                update={"baseline_config": baseline_config},
+            )
+        }
+    )
 
 
 def compile_project_spec(
@@ -154,6 +208,7 @@ def compile_project_spec(
     security_mode: Optional[SecurityMode] = None,
 ) -> ProjectSpec:
     root = Path(project_root).expanduser().resolve()
+    config = normalized_project_config(root, config)
     working_dir = _resolve_project_path(root, config.advanced.working_dir or ".")
     launcher = _render_launcher(root, config)
     return ProjectSpec(
@@ -186,11 +241,15 @@ def detect_project(project_root: str | Path) -> ProjectDiscovery:
         limit=8,
     )
     data_dirs = _discover_named_dirs(root, {"data", "dataset", "datasets"}, limit=8)
-    config_files = _discover_files(
-        root,
-        ("config.yaml", "config.yml", "configs/*.yaml", "configs/*.yml", "*.yaml", "*.yml"),
-        limit=8,
-    )
+    config_files = [
+        path
+        for path in _discover_files(
+            root,
+            ("config.yaml", "config.yml", "configs/*.yaml", "configs/*.yml", "*.yaml", "*.yml"),
+            limit=16,
+        )
+        if Path(path).name not in {"environment.yml", "environment.yaml"}
+    ][:8]
     limit_flags = _detect_limit_flags(root / entrypoints[0]) if entrypoints else []
     return ProjectDiscovery(
         environment=environment,
@@ -202,19 +261,25 @@ def detect_project(project_root: str | Path) -> ProjectDiscovery:
     )
 
 
-def default_project_config(project_root: str | Path, discovery: Optional[ProjectDiscovery] = None) -> ProjectConfig:
+def default_project_config(
+    project_root: str | Path,
+    discovery: Optional[ProjectDiscovery] = None,
+    *,
+    baseline_config: Optional[str] = None,
+) -> ProjectConfig:
     discovery = discovery or detect_project(project_root)
     command = ["python", discovery.entrypoints[0]] if discovery.entrypoints else ["python", "train.py"]
-    launch_args: list[CommandArg] = []
-    if discovery.config_files:
-        launch_args.append(CommandArg(flag="--config", value=discovery.config_files[0]))
+    normalized_baseline = _normalize_baseline_config_path(
+        Path(project_root).expanduser().resolve(),
+        baseline_config,
+    )
     return ProjectConfig(
         data=[DataInput(path=path) for path in discovery.data_dirs],
         launch=LaunchConfig(
             environment=discovery.environment,
             env_name=discovery.env_name,
             command=command,
-            args=launch_args,
+            baseline_config=normalized_baseline,
         ),
         run=RunConfig(fixed_args=discovery.limit_flags),
     )
@@ -263,6 +328,15 @@ def _render_launcher(project_root: Path, config: ProjectConfig) -> str:
             command = ["conda", "run", "-n", str(config.launch.env_name), *command]
         parts = [_quote_command(command)]
 
+    if config.launch.baseline_config:
+        parts.append(
+            _render_arg(
+                CommandArg(
+                    flag="--config",
+                    value=str(_resolve_project_path(project_root, config.launch.baseline_config)),
+                )
+            )
+        )
     for item in config.launch.args:
         parts.append(_render_arg(item))
     for item in config.data:
@@ -292,6 +366,49 @@ def _resolve_project_path(project_root: Path, raw_path: str) -> Path:
     if not path.is_absolute():
         path = project_root / path
     return path.resolve()
+
+
+def _normalize_baseline_config_path(project_root: Path, raw_path: Optional[str]) -> Optional[str]:
+    if raw_path is None:
+        return None
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    candidate = candidate.resolve()
+    try:
+        relative = candidate.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError(f"launch.baseline_config must stay within project_root: {candidate}") from exc
+    if not candidate.is_file():
+        raise ValueError(f"launch.baseline_config not found: {candidate}")
+    return relative.as_posix()
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _detect_environment(project_root: Path) -> tuple[LaunchEnvironment, Optional[str]]:
