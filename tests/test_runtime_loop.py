@@ -4,6 +4,7 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 from trainee.executor import TrainingExecutor
 from trainee.models import ProjectSpec
@@ -223,6 +224,122 @@ log_path.write_text(line, encoding="utf-8")
     assert runs_payload["rounds"][0]["status"] == "completed"
     assert config_path.read_text(encoding="utf-8") == "lr: 0.2\nepochs: 2\n"
     assert str(config_path) in runs_payload["rounds"][0]["resolved_command"]
+
+
+def test_loop_generates_round_config_from_tunables(runtime_env, wait_for):
+    client = runtime_env["client"]
+    external_project = runtime_env["external_project"]
+    python = runtime_env["python"]
+
+    (external_project / "configs").mkdir(exist_ok=True)
+    baseline_config = external_project / "configs" / "fit.yaml"
+    baseline_config.write_text(
+        """
+data:
+  max_frames: null
+fit:
+  term_weights:
+    theta: 9.0
+""".lstrip(),
+        encoding="utf-8",
+    )
+    script_path = external_project / "scripts" / "config_train.py"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(
+        """
+import argparse
+import yaml
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", required=True)
+args = parser.parse_args()
+
+with open(args.config, encoding="utf-8") as handle:
+    cfg = yaml.safe_load(handle)
+
+max_frames = cfg["data"]["max_frames"]
+theta = cfg["fit"]["term_weights"]["theta"]
+print(f"max_frames={max_frames} theta={theta} total_loss={float(max_frames):.1f}", flush=True)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    registration = {
+        "project_root": str(external_project),
+        "version": 1,
+        "data": [{"path": "data"}],
+        "launch": {
+            "environment": "system",
+            "command": [python, "scripts/config_train.py"],
+            "baseline_config": "configs/fit.yaml",
+            "args": [],
+        },
+        "run": {
+            "max_rounds": 1,
+            "timeout_minutes": 1,
+            "fixed_args": [],
+        },
+        "tuning": {
+            "params": [
+                {
+                    "name": "max_frames",
+                    "type": "int",
+                    "default": 5,
+                    "min_value": 1,
+                    "max_value": 10,
+                    "config_path": "data.max_frames",
+                },
+                {
+                    "name": "theta_weight",
+                    "type": "float",
+                    "default": 11.0,
+                    "min_value": 1.0,
+                    "max_value": 20.0,
+                    "config_path": "fit.term_weights.theta",
+                }
+            ]
+        },
+        "metrics": {
+            "specs": [
+                {
+                    "name": "total_loss",
+                    "source": "stdout_regex",
+                    "key_or_pattern": r"total_loss=(?P<value>-?\d+(?:\.\d+)?)",
+                    "goal": "min",
+                    "required": True,
+                }
+            ],
+            "prompt": "",
+        },
+        "advanced": {
+            "security_mode": "unsafe",
+            "working_dir": ".",
+            "heartbeat_interval_sec": 0.1,
+            "stall_timeout_sec": 1.5,
+            "signal_sources": [{"type": "stdout"}],
+            "log_paths": [".trainee/runs/**/*.log"],
+            "wandb_enabled": False,
+        },
+    }
+
+    assert client.post("/api/project/register", json=registration).status_code == 200
+    assert client.post("/api/loop/start").status_code == 200
+
+    wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
+    runs_payload = client.get("/api/runs").json()
+    session_id = runs_payload["sessions"][0]["id"]
+    round_config = external_project / ".trainee" / "runs" / f"session-{session_id:04d}" / "round-0001" / "config.yaml"
+    generated = yaml.safe_load(round_config.read_text(encoding="utf-8"))
+    original = yaml.safe_load(baseline_config.read_text(encoding="utf-8"))
+
+    assert runs_payload["rounds"][0]["status"] == "completed"
+    assert str(round_config) in runs_payload["rounds"][0]["resolved_command"]
+    assert str(baseline_config) not in runs_payload["rounds"][0]["resolved_command"]
+    assert generated["data"]["max_frames"] == 5
+    assert generated["fit"]["term_weights"]["theta"] == 11.0
+    assert original["data"]["max_frames"] is None
+    assert original["fit"]["term_weights"]["theta"] == 9.0
 
 
 def test_loop_collects_metrics_from_log_file_created_during_round(runtime_env, wait_for):

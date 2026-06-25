@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import httpx
 import uvicorn
+import yaml
 
 from trainee import __updated_at__, __version__
 from trainee.context_builder import ContextBuilder
@@ -27,10 +28,17 @@ from trainee.project_config import (
     load_project_config,
     project_config_path,
     render_project_config_yaml,
+    save_project_config,
 )
 from trainee.providers import AgentDebugSettingsUpdate, ProviderSettingsUpdate, SystemPromptUpdate
 from trainee.settings import load_settings
 from trainee.storage import Storage
+from trainee.tunable_discovery import (
+    TunableDiscoveryApply,
+    TunableDiscoveryEngine,
+    TunableDiscoveryRequest,
+    apply_tunable_suggestions,
+)
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -113,6 +121,20 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         method="GET",
         path="/api/project",
         input_schema=_empty_schema(),
+    ),
+    ToolDefinition(
+        name="project_suggest_tunables",
+        description="Suggest config-backed tunable params from the saved project context and baseline config.",
+        method="POST",
+        path="/api/project/tunables/suggest",
+        input_schema=TunableDiscoveryRequest.model_json_schema(),
+    ),
+    ToolDefinition(
+        name="project_apply_tunables",
+        description="Apply reviewed tunable param suggestions to .trainee/project.yaml.",
+        method="POST",
+        path="/api/project/tunables/apply",
+        input_schema=TunableDiscoveryApply.model_json_schema(),
     ),
     ToolDefinition(
         name="runtime_provider_get",
@@ -273,6 +295,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = run_doctor(Path(args.project_root))
         print(format_doctor_report(report), end="")
         return 1 if report.has_failures else 0
+
+    if command == "suggest-tunables":
+        try:
+            result = asyncio.run(
+                suggest_tunables(
+                    Path(args.project_root),
+                    apply=args.apply,
+                    replace=args.replace,
+                    limit=args.limit,
+                )
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        _print_suggest_tunables_result(result)
+        return 0
 
     if command == "call":
         try:
@@ -468,6 +506,32 @@ async def run_project(project_root: Path, security_mode: str | None = None) -> d
         storage.close()
 
 
+async def suggest_tunables(
+    project_root: Path,
+    *,
+    apply: bool = False,
+    replace: bool = False,
+    limit: int = 8,
+) -> dict[str, Any]:
+    project_root = project_root.expanduser().resolve()
+    config = load_project_config(project_root)
+    spec = compile_project_spec(project_root, config)
+    context = ContextBuilder().build(spec)
+    settings = load_settings(repo_root=project_root, project_root=project_root)
+    result = await TunableDiscoveryEngine(settings).suggest(spec, context, limit=limit)
+    applied = []
+    if apply:
+        updated, applied = apply_tunable_suggestions(config, result.suggestions, replace=replace)
+        save_project_config(project_root, updated)
+    return {
+        "project_root": project_root,
+        "config_path": project_config_path(project_root),
+        "result": result,
+        "applied": applied,
+        "apply": apply,
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Trainee agent runtime.")
     subparsers = parser.add_subparsers(dest="command")
@@ -512,6 +576,13 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="Check whether a training project is ready for Trainee.")
     doctor_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     doctor_parser.set_defaults(command="doctor")
+
+    suggest_parser = subparsers.add_parser("suggest-tunables", help="Suggest config-backed tuning params from project context.")
+    suggest_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
+    suggest_parser.add_argument("--limit", default=8, type=int, help="Maximum suggestions to return.")
+    suggest_parser.add_argument("--apply", action="store_true", help="Write suggestions into .trainee/project.yaml.")
+    suggest_parser.add_argument("--replace", action="store_true", help="With --apply, replace existing tuning.params.")
+    suggest_parser.set_defaults(command="suggest-tunables")
 
     tools_parser = subparsers.add_parser("tools", help="Print tool-call compatible function schemas.")
     tools_parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Base URL to include in the manifest.")
@@ -681,7 +752,9 @@ def _format_data_inputs(values: Sequence[Any]) -> str:
 def _format_tunable_params(values: Sequence[Any]) -> str:
     rendered = []
     for item in values:
-        details = [item.flag, item.type]
+        target = item.config_path or item.flag or "unset"
+        target_kind = "config" if item.config_path else "cli"
+        details = [f"{target_kind}:{target}", item.type]
         if item.default is not None:
             details.append(f"default={item.default}")
         if item.min_value is not None or item.max_value is not None:
@@ -723,6 +796,22 @@ def _print_run_result(result: Mapping[str, Any]) -> None:
     print(f"- Status: {result['status']}")
     if result["message"]:
         print(f"- Message: {result['message']}")
+
+
+def _print_suggest_tunables_result(result: Mapping[str, Any]) -> None:
+    discovery = result["result"]
+    suggestions = [item.model_dump(mode="json", exclude_none=True) for item in discovery.suggestions]
+    print("Trainee tunable discovery")
+    print(f"- Project: {result['project_root']}")
+    print(f"- Baseline config: {discovery.baseline_config_path or 'not set'}")
+    print(f"- Source: {discovery.source}" + (f" ({discovery.provider}:{discovery.model})" if discovery.source == "llm" else ""))
+    print(f"- Suggestions: {len(suggestions)}")
+    for warning in discovery.warnings:
+        print(f"- Warning: {warning}")
+    if result["apply"]:
+        print(f"- Applied: {len(result['applied'])} to {Path(result['config_path']).relative_to(result['project_root'])}")
+    print("")
+    print(yaml.safe_dump(suggestions, sort_keys=False, allow_unicode=True), end="")
 
 
 def _launch_read_targets(project_root: Path) -> list[Path]:

@@ -22,7 +22,8 @@ SecurityMode = Literal["guarded", "unsafe"]
 
 class TunableParam(BaseModel):
     name: str
-    flag: str
+    flag: Optional[str] = None
+    config_path: Optional[str] = None
     type: ParamType = "float"
     default: Any = None
     min_value: Optional[float] = None
@@ -31,13 +32,29 @@ class TunableParam(BaseModel):
 
     @field_validator("flag")
     @classmethod
-    def validate_flag(cls, value: str) -> str:
+    def validate_flag(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
         if not value.startswith("-"):
             raise ValueError("flag must start with '-' or '--'")
         return value
 
+    @field_validator("config_path")
+    @classmethod
+    def validate_config_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(not part for part in normalized.split(".")):
+            raise ValueError("config_path must use non-empty dot-separated segments")
+        return normalized
+
     @model_validator(mode="after")
     def validate_bounds(self) -> "TunableParam":
+        if not self.flag and not self.config_path:
+            raise ValueError("tunable param requires flag or config_path")
         if self.min_value is not None and self.max_value is not None and self.min_value > self.max_value:
             raise ValueError("min_value cannot be greater than max_value")
         if self.choices and self.type != "str":
@@ -137,6 +154,7 @@ class ProjectSpec(BaseModel):
     round_timeout_sec: Optional[float] = None
     max_rounds: int = 3
     tunable_params: List[TunableParam] = Field(default_factory=list)
+    baseline_config_path: Optional[str] = None
     metric_specs: List[MetricSpec] = Field(default_factory=list)
     metric_prompt: str = ""
     tuning_prompt: str = ""
@@ -205,6 +223,12 @@ class ProjectSpec(BaseModel):
 
     def legacy_log_paths_for_metrics(self) -> List[str]:
         return list(self.log_paths)
+
+    def uses_generated_config(self) -> bool:
+        return bool(
+            self.baseline_config_path
+            and any(item.config_path for item in self.tunable_params)
+        )
 
 
 def _dedupe(values: List[str]) -> List[str]:

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
+import yaml
+
 from trainee.models import ProjectSpec, utc_now
 from trainee.parsers import extract_wandb_url
 from trainee.security import build_secure_command, project_trainee_dir
@@ -88,6 +90,7 @@ class TrainingExecutor:
         internal_log_path = internal_session_dir / f"round-{round_index:04d}.log"
         workspace = self.round_workspace(spec, session_id, round_index)
         workspace.ensure_dirs()
+        self.write_round_config(spec, param_values, workspace)
         resolved_command = self.render_command(spec, param_values, session_id=session_id, round_index=round_index)
         working_dir = Path(spec.working_dir).expanduser().resolve()
         signal_log_paths = self._configured_paths(spec.signal_log_paths(), working_dir)
@@ -254,6 +257,41 @@ class TrainingExecutor:
         rendered = spec.launcher_template.format_map({k: v for k, v in template_vars.items() if k != "extra_args"}).strip()
         return f"{rendered} {extra_args}".strip()
 
+    def write_round_config(
+        self,
+        spec: ProjectSpec,
+        param_values: Dict[str, Any],
+        workspace: RoundWorkspace,
+    ) -> Optional[Path]:
+        if not spec.uses_generated_config():
+            return None
+        if not spec.baseline_config_path:
+            raise ValueError("baseline_config_path is required for generated round configs")
+
+        baseline_path = Path(spec.baseline_config_path).expanduser().resolve()
+        try:
+            payload = yaml.safe_load(baseline_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ValueError(f"baseline config is invalid YAML: {baseline_path}: {exc}") from exc
+
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise ValueError(f"baseline config must contain a YAML mapping: {baseline_path}")
+
+        values = spec.merge_param_values(param_values)
+        for param in spec.tunable_params:
+            if not param.config_path or param.name not in values:
+                continue
+            _set_config_value(payload, param.config_path, param.normalize_value(values[param.name]))
+
+        workspace.config_path.parent.mkdir(parents=True, exist_ok=True)
+        workspace.config_path.write_text(
+            yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        return workspace.config_path
+
     def round_workspace(self, spec: ProjectSpec, session_id: int, round_index: int) -> RoundWorkspace:
         trainee_dir = project_trainee_dir(Path(spec.project_root))
         session_dir = trainee_dir / "runs" / f"session-{session_id:04d}"
@@ -296,6 +334,11 @@ class TrainingExecutor:
         working_dir = Path(spec.working_dir).expanduser().resolve()
 
         self._ensure_within(working_dir, project_root, "working_dir")
+        if spec.baseline_config_path:
+            baseline_config_path = Path(spec.baseline_config_path).expanduser().resolve()
+            self._ensure_within(baseline_config_path, project_root, "baseline_config_path")
+            if not baseline_config_path.is_file():
+                raise ValueError(f"baseline_config_path not found: {baseline_config_path}")
         path_groups = [
             ("data_paths", spec.data_paths, False),
             ("log_paths", spec.log_paths, True),
@@ -327,6 +370,10 @@ class TrainingExecutor:
     def _render_cli_args(self, spec: ProjectSpec, param_values: Dict[str, Any]) -> str:
         parts: List[str] = []
         for param in spec.tunable_params:
+            if param.config_path:
+                continue
+            if not param.flag:
+                continue
             if param.name not in param_values:
                 continue
             value = param.normalize_value(param_values[param.name])
@@ -426,6 +473,17 @@ class TrainingExecutor:
         if candidate is None:
             return current
         return current if datetime.fromisoformat(current) >= datetime.fromisoformat(candidate) else candidate
+
+
+def _set_config_value(payload: Dict[str, Any], raw_path: str, value: Any) -> None:
+    parts = raw_path.split(".")
+    current = payload
+    for part in parts[:-1]:
+        child = current.setdefault(part, {})
+        if not isinstance(child, dict):
+            raise ValueError(f"cannot set config path through non-mapping segment: {raw_path}")
+        current = child
+    current[parts[-1]] = value
 
 
 @dataclass

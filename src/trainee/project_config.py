@@ -6,7 +6,7 @@ import shlex
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Iterable, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -115,9 +115,37 @@ class ProjectConfig(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
 
+    @model_validator(mode="after")
+    def validate_fixed_args_exclude_tunables(self) -> "ProjectConfig":
+        exclusions = fixed_arg_exclusions(self.run.fixed_args)
+        conflicts = [
+            item.name
+            for item in self.tuning.params
+            if tunable_excluded_by_fixed_args(item, exclusions)
+        ]
+        if conflicts:
+            raise ValueError("tuning.params must not include run.fixed_args: " + ", ".join(conflicts))
+        return self
+
 
 class ProjectRegistration(ProjectConfig):
     project_root: str
+
+
+def fixed_arg_exclusions(fixed_args: Iterable[CommandArg]) -> set[str]:
+    exclusions: set[str] = set()
+    for item in fixed_args:
+        exclusions.add(item.flag)
+        exclusions.add(_param_key(item.flag))
+    return exclusions
+
+
+def tunable_excluded_by_fixed_args(param: TunableParam, exclusions: set[str]) -> bool:
+    candidates = {param.name, _param_key(param.name)}
+    if param.flag:
+        candidates.add(param.flag)
+        candidates.add(_param_key(param.flag))
+    return bool(candidates & exclusions)
 
 
 @dataclass(frozen=True)
@@ -211,6 +239,7 @@ def compile_project_spec(
     config = normalized_project_config(root, config)
     working_dir = _resolve_project_path(root, config.advanced.working_dir or ".")
     launcher = _render_launcher(root, config)
+    baseline_config_path = str(_resolve_project_path(root, config.launch.baseline_config)) if config.launch.baseline_config else None
     return ProjectSpec(
         project_root=str(root),
         working_dir=str(working_dir),
@@ -226,6 +255,7 @@ def compile_project_spec(
         round_timeout_sec=config.run.timeout_minutes * 60 if config.run.timeout_minutes is not None else None,
         max_rounds=config.run.max_rounds,
         tunable_params=config.tuning.params,
+        baseline_config_path=baseline_config_path,
         metric_specs=config.metrics.specs,
         metric_prompt=config.metrics.prompt,
         tuning_prompt=config.advanced.tuning_prompt,
@@ -329,14 +359,17 @@ def _render_launcher(project_root: Path, config: ProjectConfig) -> str:
         parts = [_quote_command(command)]
 
     if config.launch.baseline_config:
-        parts.append(
-            _render_arg(
-                CommandArg(
-                    flag="--config",
-                    value=str(_resolve_project_path(project_root, config.launch.baseline_config)),
+        if _uses_generated_config(config):
+            parts.append("--config {config_path}")
+        else:
+            parts.append(
+                _render_arg(
+                    CommandArg(
+                        flag="--config",
+                        value=str(_resolve_project_path(project_root, config.launch.baseline_config)),
+                    )
                 )
             )
-        )
     for item in config.launch.args:
         parts.append(_render_arg(item))
     for item in config.data:
@@ -349,6 +382,13 @@ def _render_launcher(project_root: Path, config: ProjectConfig) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
+def _uses_generated_config(config: ProjectConfig) -> bool:
+    return bool(
+        config.launch.baseline_config
+        and any(item.config_path for item in config.tuning.params)
+    )
+
+
 def _quote_command(command: list[str]) -> str:
     return " ".join(shlex.quote(str(item)) for item in command)
 
@@ -359,6 +399,10 @@ def _render_arg(item: CommandArg) -> str:
     if item.value is False:
         return ""
     return f"{item.flag} {shlex.quote(str(item.value))}"
+
+
+def _param_key(value: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z]+", "_", value.lstrip("-")).strip("_").lower()
 
 
 def _resolve_project_path(project_root: Path, raw_path: str) -> Path:

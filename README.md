@@ -153,6 +153,12 @@ tuning:
       default: 0.001
       min_value: 0.00001
       max_value: 0.01
+    - name: theta_weight
+      config_path: fit.term_weights.theta
+      type: float
+      default: 9.0
+      min_value: 1.0
+      max_value: 15.0
 
 metrics:
   specs:
@@ -195,13 +201,15 @@ advanced:
 
 Trainee appends arguments in this order:
 
-1. `launch.baseline_config` as `--config <path>`, if set.
+1. `launch.baseline_config` as `--config <path>`, if set. When config-backed tunable parameters are configured, Trainee first writes a per-round config at `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that path instead.
 2. `launch.args`.
 3. `data` entries that have a `flag`.
 4. `run.fixed_args`.
 5. Agent-controlled `tuning.params`.
 
-Only `tuning.params` may be changed by the agent. `run.fixed_args` stay constant across every round.
+Only `tuning.params` may be changed by the agent. `run.fixed_args` stay constant across every round and exclude matching names or flags from `tuning.params`.
+
+Use `tuning.params[].config_path` for agent-controlled edits to fields inside `launch.baseline_config`. Config-backed tunable parameters are written into the generated per-round config and are not appended as CLI flags.
 
 For commands that cannot be expressed structurally, use `advanced.shell_command`. Include `{extra_args}` where the generated tunable parameters should be inserted.
 

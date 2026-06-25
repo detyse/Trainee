@@ -16,6 +16,16 @@
     hx-target="#project-section"
     hx-swap="outerHTML"
   >
+    {% if tunable_discovery is defined and tunable_discovery %}
+      <div class="notice">
+        Suggested {{ tunable_discovery.suggestions | length }} tunable parameter{{ "" if tunable_discovery.suggestions | length == 1 else "s" }}
+        from {{ tunable_discovery.source }} discovery. Review the YAML below, then save project.yaml to approve.
+        {% for warning in tunable_discovery.warnings %}
+          <br /><span class="muted">{{ warning }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+
     <label>
       <span>Project root</span>
       <input type="text" name="project_root" value="{{ spec.project_root if spec else runtime_settings.launch_project_root }}" placeholder="/path/to/project" />
@@ -95,7 +105,7 @@
           <textarea name="fixed_args_lines" rows="4" placeholder="--max-iter=1000">{% if cfg %}{% for item in cfg.run.fixed_args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
         </label>
       </div>
-      <p class="muted">Fixed arguments are identical in every round and cannot be changed by the agent.</p>
+      <p class="muted">Fixed arguments are identical in every round and exclude matching names or flags from tunable parameters.</p>
     </div>
 
     <div class="two-col">
@@ -175,6 +185,7 @@
     </div>
 
     <div class="actions">
+      <button class="secondary" type="submit" formaction="/ui/project/tunables/suggest" hx-post="/ui/project/tunables/suggest" hx-target="#project-section" hx-swap="outerHTML">Suggest Tunables</button>
       <button class="primary" type="submit">Save project.yaml</button>
     </div>
   </form>

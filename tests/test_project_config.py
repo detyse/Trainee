@@ -92,6 +92,53 @@ def test_data_fixed_args_and_tunable_args_have_stable_order(tmp_path: Path) -> N
     assert "--max-iter" not in [item.flag for item in spec.tunable_params]
 
 
+def test_config_backed_tunables_use_generated_round_config(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "configs").mkdir()
+    (project / "configs" / "base.yaml").write_text("data:\n  max_frames: null\n", encoding="utf-8")
+    config = ProjectConfig(
+        launch=LaunchConfig(
+            command=["python", "-m", "src.run_fitting"],
+            baseline_config="configs/base.yaml",
+        ),
+        tuning=TuningConfig(
+            params=[
+                {
+                    "name": "theta_weight",
+                    "type": "float",
+                    "default": 9.0,
+                    "min_value": 1.0,
+                    "max_value": 15.0,
+                    "config_path": "fit.term_weights.theta",
+                }
+            ]
+        ),
+    )
+
+    spec = compile_project_spec(project, config)
+    command = TrainingExecutor().render_command(spec, {"theta_weight": 10.0}, session_id=3, round_index=2)
+
+    assert spec.uses_generated_config()
+    assert f"--config {project}/.trainee/runs/session-0003/round-0002/config.yaml" in command
+    assert str(project / "configs" / "base.yaml") not in command
+    assert "theta_weight" not in command
+
+
+def test_fixed_args_exclude_matching_tunable_flags_and_names() -> None:
+    for tunable in (
+        {"name": "max_iter", "flag": "--train-max-iter", "type": "int"},
+        {"name": "other", "flag": "--max-iter", "type": "int"},
+        {"name": "max_iter", "config_path": "fit.stages.global.max_iters", "type": "int"},
+    ):
+        with pytest.raises(ValueError, match="tuning.params must not include run.fixed_args"):
+            ProjectConfig(
+                launch=LaunchConfig(command=["python", "train.py"]),
+                run=RunConfig(fixed_args=[CommandArg(flag="--max-iter", value=1000)]),
+                tuning=TuningConfig(params=[tunable]),
+            )
+
+
 def test_detection_reports_conda_entrypoints_data_configs_and_limit(tmp_path: Path) -> None:
     project = tmp_path / "project"
     (project / "data").mkdir(parents=True)

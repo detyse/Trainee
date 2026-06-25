@@ -34,5 +34,5 @@ def test_context_builder_extracts_project_shape(runtime_env):
     assert "Fake Trainer" in context.project_summary
     assert "train.py" in context.training_entrypoint_summary
     assert "Configured data paths" in context.data_summary
-    assert "lr (--lr, float)" in context.parameter_summary
+    assert "lr (cli:--lr, float)" in context.parameter_summary
     assert "total_loss" in context.result_reading_summary

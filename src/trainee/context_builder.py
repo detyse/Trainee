@@ -59,7 +59,9 @@ class ContextBuilder:
         if spec.tunable_params:
             rendered = []
             for item in spec.tunable_params:
-                bits = [f"{item.name} ({item.flag}, {item.type})"]
+                target = item.config_path or item.flag or "unset"
+                target_kind = "config" if item.config_path else "cli"
+                bits = [f"{item.name} ({target_kind}:{target}, {item.type})"]
                 if item.default is not None:
                     bits.append(f"default={item.default}")
                 if item.min_value is not None or item.max_value is not None:

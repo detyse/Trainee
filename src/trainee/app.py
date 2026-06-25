@@ -32,6 +32,7 @@ from trainee.project_config import (
     RunConfig,
     TuningConfig,
     compile_project_spec,
+    load_project_config,
     normalized_project_config,
     project_config_path,
     project_config_from_spec,
@@ -60,6 +61,12 @@ from trainee.providers import (
 from trainee.reporter import ReportGenerator
 from trainee.settings import Settings, load_settings, save_global_config
 from trainee.storage import ImageAnalysisLimitExceeded, Storage
+from trainee.tunable_discovery import (
+    TunableDiscoveryApply,
+    TunableDiscoveryEngine,
+    TunableDiscoveryRequest,
+    apply_tunable_suggestions,
+)
 
 MAX_LLM_TEST_IMAGE_BYTES = 5 * 1024 * 1024
 logger = get_logger(__name__)
@@ -255,6 +262,40 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         bundle["config_path"] = payload["project_config_path"]
         return JSONResponse(bundle)
 
+    @app.post("/api/project/tunables/suggest")
+    async def api_suggest_tunables(request: Request, payload: Optional[Dict[str, Any]] = None) -> JSONResponse:
+        runtime = get_runtime(request)
+        try:
+            project_root, config, limit = _project_config_from_discovery_payload(runtime, payload)
+            normalized = normalized_project_config(project_root, config)
+            spec = compile_project_spec(project_root, normalized)
+            context = runtime.context_builder.build(spec)
+            result = await TunableDiscoveryEngine(runtime.settings).suggest(spec, context, limit=limit)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.post("/api/project/tunables/apply")
+    async def api_apply_tunables(request: Request, payload: TunableDiscoveryApply) -> JSONResponse:
+        runtime = get_runtime(request)
+        try:
+            project_root = Path(payload.project_root).expanduser().resolve()
+            config = load_project_config(project_root)
+            updated, applied = apply_tunable_suggestions(
+                config,
+                payload.suggestions,
+                replace=payload.replace,
+            )
+            bundle = await _register_project_config(runtime, project_root, updated)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "applied": [item.model_dump(mode="json") for item in applied],
+                "bundle": bundle.model_dump(mode="json"),
+            }
+        )
+
     @app.get("/api/health")
     async def api_health(request: Request) -> JSONResponse:
         return JSONResponse(_health_payload(request))
@@ -442,6 +483,26 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _render_refresh_response(request, templates, runtime)
+
+    @app.post("/ui/project/tunables/suggest")
+    async def ui_suggest_tunables(request: Request) -> HTMLResponse:
+        runtime = get_runtime(request)
+        form = await request.form()
+        try:
+            project_root, config = _project_config_from_form(form)
+            normalized = normalized_project_config(project_root, config)
+            spec = compile_project_spec(project_root, normalized)
+            context = runtime.context_builder.build(spec)
+            result = await TunableDiscoveryEngine(runtime.settings).suggest(spec, context)
+            suggested_config, _ = apply_tunable_suggestions(config, result.suggestions)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = runtime.dashboard_payload()
+        payload["project_config"] = suggested_config
+        payload["spec"] = spec
+        payload["project_config_path"] = str(project_config_path(project_root))
+        payload["tunable_discovery"] = result
+        return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
 
     @app.post("/ui/prompt-presets/save")
     async def ui_save_prompt_preset(request: Request) -> HTMLResponse:
@@ -706,6 +767,32 @@ async def _register_project_config(
     except Exception:
         restore_project_config(project_root, previous)
         raise
+
+
+def _project_config_from_discovery_payload(
+    runtime: RuntimeService,
+    payload: Optional[Dict[str, Any]],
+) -> tuple[Path, ProjectConfig, int]:
+    payload = payload or {}
+    limit = int(payload.get("limit", TunableDiscoveryRequest().limit))
+    limit = max(1, min(32, limit))
+    if "launch" in payload:
+        registration = ProjectRegistration.model_validate(payload)
+        project_root = Path(registration.project_root).expanduser().resolve()
+        return project_root, ProjectConfig.model_validate(registration.model_dump(exclude={"project_root"})), limit
+
+    request_payload = TunableDiscoveryRequest.model_validate(payload)
+    if request_payload.project_root:
+        project_root = Path(request_payload.project_root).expanduser().resolve()
+    else:
+        bundle = runtime.get_bundle()
+        if bundle.spec is not None:
+            project_root = Path(bundle.spec.project_root).expanduser().resolve()
+        elif runtime.settings.project_root is not None:
+            project_root = runtime.settings.project_root
+        else:
+            raise ValueError("project_root is required before tunable discovery")
+    return project_root, load_project_config(project_root), limit
 
 
 def _project_config_from_form(form: FormData) -> tuple[Path, ProjectConfig]:
