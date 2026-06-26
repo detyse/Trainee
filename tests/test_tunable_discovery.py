@@ -7,10 +7,15 @@ import yaml
 from trainee.context_builder import ContextBuilder
 from trainee.project_config import CommandArg, LaunchConfig, ProjectConfig, RunConfig, compile_project_spec
 from trainee.tunable_discovery import (
+    TunableDiscoveryRequest,
     TunableParamSuggestion,
     apply_tunable_suggestions,
     suggest_tunable_params_heuristic,
 )
+
+
+def test_tunable_discovery_default_limit_is_32() -> None:
+    assert TunableDiscoveryRequest().limit == 32
 
 
 def test_heuristic_discovery_suggests_config_loss_weights(tmp_path: Path) -> None:

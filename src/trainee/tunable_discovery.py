@@ -54,7 +54,7 @@ class TunableParamSuggestion(BaseModel):
 
 class TunableDiscoveryRequest(BaseModel):
     project_root: Optional[str] = None
-    limit: int = Field(default=8, ge=1, le=32)
+    limit: int = Field(default=32, ge=1, le=32)
 
 
 class TunableDiscoveryApply(BaseModel):
@@ -88,7 +88,7 @@ class TunableDiscoveryEngine:
         spec: ProjectSpec,
         context: ProjectContext,
         *,
-        limit: int = 8,
+        limit: int = 32,
         fixed_args: Iterable[CommandArg] = (),
     ) -> TunableDiscoveryResult:
         exclusions = fixed_arg_exclusions(fixed_args)
@@ -134,7 +134,7 @@ def suggest_tunable_params_heuristic(
     spec: ProjectSpec,
     context: ProjectContext,
     *,
-    limit: int = 8,
+    limit: int = 32,
     exclusions: Optional[set[str]] = None,
 ) -> TunableDiscoveryResult:
     warnings: list[str] = []

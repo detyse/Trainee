@@ -115,6 +115,8 @@ trainee init --force
 
 When a new config is initialized with `--baseline-config`, Trainee uses the project context and baseline config to generate `.trainee/tuning.yaml` params automatically. It uses the configured LLM when available and falls back to conservative heuristics. Review the generated whitelist before running. `launch.args` and `run.fixed_args` are excluded from discovery.
 
+You can also run `trainee init`, edit `launch.baseline_config` in `.trainee/project.yaml`, then run `trainee init` again. The second run keeps `project.yaml` and fills an empty `.trainee/tuning.yaml` from the selected baseline config.
+
 Detected config files are suggestions only. Trainee does not automatically choose `config.yaml`, `environment.yml`, or any other config as the baseline.
 
 ## Configuration: `.trainee/project.yaml` and `.trainee/tuning.yaml`
@@ -218,7 +220,7 @@ Trainee appends arguments in this order:
 
 Only `tuning.yaml` params may be changed by the agent. `launch.args` and `run.fixed_args` stay constant across every round and exclude matching names, flags, or config path keys from tuning discovery.
 
-`trainee init --baseline-config ...` writes discovered parameters into `.trainee/tuning.yaml` and reminds you to review them. `trainee tunables discover` can rerun discovery later. The Web UI keeps an explicit review step before saving suggestions, and the tool API exposes separate suggest/apply calls.
+`trainee init --baseline-config ...` writes discovered parameters into `.trainee/tuning.yaml` and reminds you to review them. If you set `launch.baseline_config` later in `.trainee/project.yaml`, rerun `trainee init` to fill an empty `tuning.yaml`. `trainee tunables discover` can rerun discovery later; discovery returns up to 32 suggestions by default. The Web UI keeps an explicit review step before saving suggestions, and the tool API exposes separate suggest/apply calls.
 
 Use `params[].config_path` in `tuning.yaml` for agent-controlled edits to fields inside `launch.baseline_config`. Config-backed tunable parameters are written into the generated per-round config and are not appended as CLI flags. If `params` is empty, Trainee still writes the per-round config unchanged; the agent simply has no approved parameters to change.
 

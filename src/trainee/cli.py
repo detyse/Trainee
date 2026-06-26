@@ -447,7 +447,11 @@ async def initialize_project(
     context = ContextBuilder().build(spec)
     tunable_discovery = None
     applied_tunables = []
-    if generate_config and config.launch.baseline_config:
+    should_discover_tunables = bool(
+        config.launch.baseline_config
+        and (generate_config or not tuning_path.is_file() or not config.tuning.params)
+    )
+    if should_discover_tunables:
         settings = load_settings(repo_root=project_root, project_root=project_root)
         tunable_discovery = await TunableDiscoveryEngine(settings).suggest(
             spec,
@@ -469,11 +473,16 @@ async def initialize_project(
         trainee_dir / "context.md": _render_context_markdown(context),
         trainee_dir / "README.md": _render_launch_readme(project_root, discovery),
     }
+    write_discovered_tuning = tunable_discovery is not None and not generate_config
     already_initialized = all(path.exists() for path in outputs)
     written: list[Path] = []
     skipped: list[Path] = []
     for path, content in outputs.items():
         if path.exists() and not force:
+            if path == tuning_path and write_discovered_tuning:
+                path.write_text(content, encoding="utf-8")
+                written.append(path)
+                continue
             skipped.append(path)
             continue
         path.write_text(content, encoding="utf-8")
@@ -547,7 +556,7 @@ async def discover_tunables(
     *,
     apply: bool = False,
     replace: bool = False,
-    limit: int = 8,
+    limit: int = 32,
 ) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     config = load_project_config(project_root)
@@ -621,7 +630,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tunables_subparsers = tunables_parser.add_subparsers(dest="tunables_command", required=True)
     discover_parser = tunables_subparsers.add_parser("discover", help="Suggest config-backed tuning params from project context.")
     discover_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
-    discover_parser.add_argument("--limit", default=8, type=int, help="Maximum suggestions to return.")
+    discover_parser.add_argument("--limit", default=32, type=int, help="Maximum suggestions to return.")
     discover_parser.add_argument("--apply", action="store_true", help="Write suggestions into .trainee/tuning.yaml.")
     discover_parser.add_argument("--replace", action="store_true", help="With --apply, replace existing tuning.yaml params.")
     discover_parser.set_defaults(command="tunables-discover")
@@ -693,6 +702,8 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
         print("- Status: regenerated project files (--force)")
     elif result["already_initialized"] and not result["files_written"]:
         print("- Status: already initialized; kept existing project files")
+    elif result["tunable_discovery"] is not None and Path(result["config_path"]) in result["files_skipped"]:
+        print("- Status: updated tuning.yaml from existing project config")
     elif result["files_skipped"]:
         print("- Status: added missing project files; kept existing files")
     else:
@@ -764,11 +775,12 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     print("Tunable discovery")
     tunable_discovery = result["tunable_discovery"]
     if tunable_discovery is None:
-        reason = (
-            "kept existing project.yaml"
-            if not result["force"] and Path(result["config_path"]) in result["files_skipped"]
-            else "launch.baseline_config is not set"
-        )
+        if not config.launch.baseline_config:
+            reason = "launch.baseline_config is not set"
+        elif config.tuning.params:
+            reason = "tuning.yaml already has params"
+        else:
+            reason = "kept existing project.yaml"
         print(f"- Status: skipped ({reason})")
     else:
         source = tunable_discovery.source
@@ -944,7 +956,7 @@ def _render_launch_readme(project_root: Path, discovery: Any) -> str:
             "",
             "1. Edit `project.yaml`: select `launch.baseline_config` and confirm data, environment, command, fixed limits, and metrics.",
             "2. Review `context.md` for the generated project understanding.",
-            "3. Re-run `trainee tunables discover --apply` to update `tuning.yaml`, then review it.",
+            "3. Re-run `trainee init` to fill an empty `tuning.yaml`, then review it.",
             "4. Run `trainee doctor` or `trainee run --dry-run` and inspect the baseline command.",
             "5. Run `trainee run`.",
             "",

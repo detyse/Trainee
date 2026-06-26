@@ -195,6 +195,34 @@ def test_init_command_sets_explicit_baseline_config(tmp_path, capsys, monkeypatc
     assert "- Generated: 1 parameter(s) in tuning.yaml params" in output
 
 
+def test_init_supplements_empty_tuning_after_project_yaml_baseline_is_set(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
+    project = tmp_path / "toymodel"
+    (project / "configs").mkdir(parents=True)
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (project / "configs" / "base.yaml").write_text("lr: 0.001\n", encoding="utf-8")
+
+    assert main(["init", str(project)]) == 0
+    project_yaml_path = project / ".trainee" / "project.yaml"
+    project_yaml = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
+    project_yaml["launch"]["baseline_config"] = "configs/base.yaml"
+    project_yaml_path.write_text(yaml.safe_dump(project_yaml, sort_keys=False), encoding="utf-8")
+    edited_project_yaml = project_yaml_path.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["init", str(project)]) == 0
+
+    output = capsys.readouterr().out
+    tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
+    assert project_yaml_path.read_text(encoding="utf-8") == edited_project_yaml
+    assert tuning_payload["params"][0]["config_path"] == "lr"
+    assert "- Status: updated tuning.yaml from existing project config" in output
+    assert "- Kept: .trainee/project.yaml" in output
+    assert "- Wrote: .trainee/tuning.yaml" in output
+    assert "- Generated: 1 parameter(s) in tuning.yaml params" in output
+
+
 def test_tunables_discover_applies_to_tuning_yaml(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
@@ -310,7 +338,7 @@ def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.1.1\nLast updated: 2026-06-26 14:26:01 +08:00\n"
+    assert capsys.readouterr().out == "Trainee 0.1.2\nLast updated: 2026-06-26 20:39:40 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):
