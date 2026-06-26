@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 import yaml
 
+from trainee.config_paths import set_config_value
 from trainee.models import ProjectSpec, utc_now
 from trainee.parsers import extract_wandb_url
 from trainee.security import build_secure_command, project_trainee_dir
@@ -165,7 +166,7 @@ class TrainingExecutor:
             [
                 *spec.signal_log_paths(),
                 *spec.metric_log_paths(),
-                *spec.legacy_log_paths_for_metrics(),
+                *spec.fallback_log_paths_for_metrics(),
             ],
             spec,
         )
@@ -285,7 +286,7 @@ class TrainingExecutor:
         for param in spec.tunable_params:
             if not param.config_path or param.name not in values:
                 continue
-            _set_config_value(payload, param.config_path, param.normalize_value(values[param.name]))
+            set_config_value(payload, param.config_path, param.normalize_value(values[param.name]))
 
         workspace.config_path.parent.mkdir(parents=True, exist_ok=True)
         workspace.config_path.write_text(
@@ -475,18 +476,6 @@ class TrainingExecutor:
         if candidate is None:
             return current
         return current if datetime.fromisoformat(current) >= datetime.fromisoformat(candidate) else candidate
-
-
-def _set_config_value(payload: Dict[str, Any], raw_path: str, value: Any) -> None:
-    parts = raw_path.split(".")
-    current = payload
-    for part in parts[:-1]:
-        child = current.setdefault(part, {})
-        if not isinstance(child, dict):
-            raise ValueError(f"cannot set config path through non-mapping segment: {raw_path}")
-        current = child
-    current[parts[-1]] = value
-
 
 @dataclass
 class _ExecutionState:

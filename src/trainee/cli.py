@@ -28,7 +28,9 @@ from trainee.project_config import (
     load_project_config,
     project_config_path,
     render_project_config_yaml,
-    save_project_config,
+    save_tuning_config,
+    tuning_config_path,
+    render_tuning_config_yaml,
 )
 from trainee.providers import AgentDebugSettingsUpdate, ProviderSettingsUpdate, SystemPromptUpdate
 from trainee.settings import load_settings
@@ -38,6 +40,7 @@ from trainee.tunable_discovery import (
     TunableDiscoveryEngine,
     TunableDiscoveryRequest,
     apply_tunable_suggestions,
+    apply_tunable_suggestions_with_report,
 )
 
 
@@ -89,7 +92,7 @@ def _object_schema(properties: dict[str, Any], required: Sequence[str] = ()) -> 
 TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         name="project_register",
-        description="Save project.yaml, register the compiled project, and rebuild its context.",
+        description="Save project.yaml and tuning.yaml, register the compiled project, and rebuild its context.",
         method="POST",
         path="/api/project/register",
         input_schema=ProjectRegistration.model_json_schema(),
@@ -131,7 +134,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         name="project_apply_tunables",
-        description="Apply reviewed tunable param suggestions to .trainee/project.yaml.",
+        description="Apply reviewed tunable param suggestions to .trainee/tuning.yaml.",
         method="POST",
         path="/api/project/tunables/apply",
         input_schema=TunableDiscoveryApply.model_json_schema(),
@@ -298,10 +301,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(format_doctor_report(report), end="")
         return 1 if report.has_failures else 0
 
-    if command == "suggest-tunables":
+    if command == "tunables-discover":
         try:
             result = asyncio.run(
-                suggest_tunables(
+                discover_tunables(
                     Path(args.project_root),
                     apply=args.apply,
                     replace=args.replace,
@@ -311,7 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        _print_suggest_tunables_result(result)
+        _print_tunable_discovery_result(result)
         return 0
 
     if command == "call":
@@ -437,6 +440,7 @@ async def initialize_project(
         baseline_config=baseline_config,
     )
     config_path = project_config_path(project_root)
+    tuning_path = tuning_config_path(project_root)
     generate_config = force or not config_path.is_file()
     config = generated_config if generate_config else load_project_config(project_root)
     spec = compile_project_spec(project_root, config)
@@ -448,7 +452,7 @@ async def initialize_project(
         tunable_discovery = await TunableDiscoveryEngine(settings).suggest(
             spec,
             context,
-            fixed_args=config.run.fixed_args,
+            fixed_args=[*config.launch.args, *config.run.fixed_args],
         )
         config, applied_tunables = apply_tunable_suggestions(
             config,
@@ -461,6 +465,7 @@ async def initialize_project(
 
     outputs = {
         config_path: _render_project_yaml(config),
+        tuning_path: render_tuning_config_yaml(config.tuning),
         trainee_dir / "context.md": _render_context_markdown(context),
         trainee_dir / "README.md": _render_launch_readme(project_root, discovery),
     }
@@ -478,6 +483,7 @@ async def initialize_project(
         "project_root": project_root,
         "trainee_dir": trainee_dir,
         "config_path": config_path,
+        "tuning_config_path": tuning_path,
         "config": config,
         "spec": spec,
         "force": force,
@@ -505,11 +511,6 @@ def init_project(
             baseline_config=baseline_config,
         )
     )
-
-
-def launch_project(project_root: Path, force: bool = False) -> dict[str, Any]:
-    return init_project(project_root, force=force)
-
 
 async def run_project(project_root: Path, security_mode: str | None = None) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
@@ -541,7 +542,7 @@ async def run_project(project_root: Path, security_mode: str | None = None) -> d
         storage.close()
 
 
-async def suggest_tunables(
+async def discover_tunables(
     project_root: Path,
     *,
     apply: bool = False,
@@ -557,17 +558,20 @@ async def suggest_tunables(
         spec,
         context,
         limit=limit,
-        fixed_args=config.run.fixed_args,
+        fixed_args=[*config.launch.args, *config.run.fixed_args],
     )
     applied = []
+    skipped = []
     if apply:
-        updated, applied = apply_tunable_suggestions(config, result.suggestions, replace=replace)
-        save_project_config(project_root, updated)
+        updated, applied, skipped = apply_tunable_suggestions_with_report(config, result.suggestions, replace=replace)
+        save_tuning_config(project_root, updated.tuning)
     return {
         "project_root": project_root,
         "config_path": project_config_path(project_root),
+        "tuning_config_path": tuning_config_path(project_root),
         "result": result,
         "applied": applied,
+        "skipped": skipped,
         "apply": apply,
     }
 
@@ -592,11 +596,7 @@ def _build_parser() -> argparse.ArgumentParser:
     version_parser = subparsers.add_parser("version", help="Print the installed version and last update date/time.")
     version_parser.set_defaults(command="version")
 
-    init_parser = subparsers.add_parser(
-        "init",
-        aliases=["launch"],
-        help="Initialize Trainee project files in a training project directory.",
-    )
+    init_parser = subparsers.add_parser("init", help="Initialize Trainee project files in a training project directory.")
     init_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     init_parser.add_argument("--force", action="store_true", help="Overwrite existing files under .trainee.")
     init_parser.add_argument(
@@ -617,19 +617,21 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     doctor_parser.set_defaults(command="doctor")
 
-    suggest_parser = subparsers.add_parser("suggest-tunables", help="Suggest config-backed tuning params from project context.")
-    suggest_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
-    suggest_parser.add_argument("--limit", default=8, type=int, help="Maximum suggestions to return.")
-    suggest_parser.add_argument("--apply", action="store_true", help="Write suggestions into .trainee/project.yaml.")
-    suggest_parser.add_argument("--replace", action="store_true", help="With --apply, replace existing tuning.params.")
-    suggest_parser.set_defaults(command="suggest-tunables")
+    tunables_parser = subparsers.add_parser("tunables", help="Inspect or update tunable parameter configuration.")
+    tunables_subparsers = tunables_parser.add_subparsers(dest="tunables_command", required=True)
+    discover_parser = tunables_subparsers.add_parser("discover", help="Suggest config-backed tuning params from project context.")
+    discover_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
+    discover_parser.add_argument("--limit", default=8, type=int, help="Maximum suggestions to return.")
+    discover_parser.add_argument("--apply", action="store_true", help="Write suggestions into .trainee/tuning.yaml.")
+    discover_parser.add_argument("--replace", action="store_true", help="With --apply, replace existing tuning.yaml params.")
+    discover_parser.set_defaults(command="tunables-discover")
 
     tools_parser = subparsers.add_parser("tools", help="Print tool-call compatible function schemas.")
     tools_parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Base URL to include in the manifest.")
     tools_parser.add_argument("--name", choices=sorted(TOOL_INDEX), help="Print only one tool definition.")
     tools_parser.set_defaults(command="tools")
 
-    call_parser = subparsers.add_parser("call", aliases=["tool"], help="Call one tool against a running Trainee service.")
+    call_parser = subparsers.add_parser("call", help="Call one tool against a running Trainee service.")
     call_parser.add_argument("name", choices=sorted(TOOL_INDEX), help="Tool name to invoke.")
     call_parser.add_argument("--input", "-i", help="JSON object, @path/to/input.json, or - for stdin.")
     call_parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Running Trainee service URL.")
@@ -707,6 +709,7 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     for path in result["files_skipped"]:
         print(f"- Kept: {Path(path).relative_to(project_root)}")
     print(f"- Config: {Path(result['config_path']).relative_to(project_root)}")
+    print(f"- Tuning: {Path(result['tuning_config_path']).relative_to(project_root)}")
 
     print("")
     print("Discovery")
@@ -772,13 +775,13 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
         if source == "llm":
             source += f" ({tunable_discovery.provider}:{tunable_discovery.model})"
         print(f"- Source: {source}")
-        print(f"- Generated: {len(result['applied_tunables'])} parameter(s) in tuning.params")
+        print(f"- Generated: {len(result['applied_tunables'])} parameter(s) in tuning.yaml params")
         for warning in tunable_discovery.warnings:
             print(f"- Warning: {warning}")
 
     print("")
     print("Next")
-    print("- Review: .trainee/project.yaml tuning.params and .trainee/context.md")
+    print("- Review: .trainee/project.yaml, .trainee/tuning.yaml, and .trainee/context.md")
     print("- Validate: trainee doctor or trainee run --dry-run")
     print("- Next: adjust generated parameters if needed, run `trainee doctor`, then run `trainee run`")
     for warning in result["warnings"]:
@@ -857,7 +860,7 @@ def _print_run_result(result: Mapping[str, Any]) -> None:
         print(f"- Message: {result['message']}")
 
 
-def _print_suggest_tunables_result(result: Mapping[str, Any]) -> None:
+def _print_tunable_discovery_result(result: Mapping[str, Any]) -> None:
     discovery = result["result"]
     suggestions = [item.model_dump(mode="json", exclude_none=True) for item in discovery.suggestions]
     print("Trainee tunable discovery")
@@ -868,7 +871,9 @@ def _print_suggest_tunables_result(result: Mapping[str, Any]) -> None:
     for warning in discovery.warnings:
         print(f"- Warning: {warning}")
     if result["apply"]:
-        print(f"- Applied: {len(result['applied'])} to {Path(result['config_path']).relative_to(result['project_root'])}")
+        print(f"- Applied: {len(result['applied'])} to {Path(result['tuning_config_path']).relative_to(result['project_root'])}")
+        for item in result.get("skipped", []):
+            print(f"- Skipped: {item.name} ({item.target}) - {item.reason}")
     print("")
     print(yaml.safe_dump(suggestions, sort_keys=False, allow_unicode=True), end="")
 
@@ -921,7 +926,8 @@ def _render_launch_readme(project_root: Path, discovery: Any) -> str:
             "",
             f"Project root: `{project_root}`",
             "",
-            "- `project.yaml`: the only user-facing run configuration.",
+            "- `project.yaml`: stable project/run contract.",
+            "- `tuning.yaml`: tunable parameter whitelist and tuning strategy.",
             "- `context.md`: generated project understanding for review.",
             "- `logs/`, `runs/`, and `artifacts/`: writable runtime outputs for guarded runs.",
             "- The decision system prompt is global in `~/.trainee/config.json` and editable in the Web UI.",
@@ -938,11 +944,11 @@ def _render_launch_readme(project_root: Path, discovery: Any) -> str:
             "",
             "1. Edit `project.yaml`: select `launch.baseline_config` and confirm data, environment, command, fixed limits, and metrics.",
             "2. Review `context.md` for the generated project understanding.",
-            "3. Re-run `trainee init --force --baseline-config <path>` to regenerate config-backed `tuning.params`, then review them.",
+            "3. Re-run `trainee tunables discover --apply` to update `tuning.yaml`, then review it.",
             "4. Run `trainee doctor` or `trainee run --dry-run` and inspect the baseline command.",
             "5. Run `trainee run`.",
             "",
-            "`run.fixed_args` are constant in every round. Only `tuning.params` may be changed by the agent.",
+            "`run.fixed_args` are constant in every round. Only `tuning.yaml` params may be changed by the agent.",
             "Fixed arguments exclude matching tunable names, flags, and config path keys from discovery.",
             "Detected config files are suggestions only; Trainee never selects one automatically.",
             "Use `advanced.shell_command` only when the structured launcher cannot express the command.",

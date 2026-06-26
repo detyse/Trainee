@@ -2,10 +2,10 @@
   {% set cfg = project_config %}
   <div class="panel-header">
     <div>
-      <p class="panel-kicker">Project YAML</p>
+      <p class="panel-kicker">Project + Tuning YAML</p>
       <h2>Training Setup</h2>
     </div>
-    <span class="muted">{{ project_config_path or "Run trainee init first" }}</span>
+    <span class="muted">{{ project_config_path or "Run trainee init first" }}{% if tuning_config_path %} · {{ tuning_config_path }}{% endif %}</span>
   </div>
 
   <form
@@ -20,7 +20,7 @@
       <input type="hidden" name="tunable_reviewed" value="1" />
       <div class="notice">
         Suggested {{ tunable_discovery.suggestions | length }} tunable parameter{{ "" if tunable_discovery.suggestions | length == 1 else "s" }}
-        from {{ tunable_discovery.source }} discovery. Review the YAML below, then save project.yaml to approve.
+        from {{ tunable_discovery.source }} discovery. Review the YAML below, then save tuning.yaml to approve.
         {% for warning in tunable_discovery.warnings %}
           <br /><span class="muted">{{ warning }}</span>
         {% endfor %}

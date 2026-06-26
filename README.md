@@ -98,6 +98,7 @@ Open `http://127.0.0.1:8000` if the browser does not open automatically.
 `trainee init` creates:
 
 - `.trainee/project.yaml` — the main project run configuration.
+- `.trainee/tuning.yaml` — the tunable parameter whitelist.
 - `.trainee/context.md` — Trainee’s generated understanding of the project.
 - `.trainee/README.md` — notes about detected candidates and local Trainee files.
 - `.trainee/logs/`, `.trainee/runs/`, `.trainee/artifacts/` — runtime output locations.
@@ -112,15 +113,15 @@ trainee init --force
 
 `--baseline-config` must point to an existing file inside the project. Trainee records it as `launch.baseline_config`; each round copies it to `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that generated path to the launcher as `--config <path>`.
 
-When a new config is initialized with `--baseline-config`, Trainee uses the project context and baseline config to generate `tuning.params` automatically. It uses the configured LLM when available and falls back to conservative heuristics. Review the generated whitelist before running. `run.fixed_args` are excluded from discovery.
+When a new config is initialized with `--baseline-config`, Trainee uses the project context and baseline config to generate `.trainee/tuning.yaml` params automatically. It uses the configured LLM when available and falls back to conservative heuristics. Review the generated whitelist before running. `launch.args` and `run.fixed_args` are excluded from discovery.
 
 Detected config files are suggestions only. Trainee does not automatically choose `config.yaml`, `environment.yml`, or any other config as the baseline.
 
-## Configuration: `.trainee/project.yaml`
+## Configuration: `.trainee/project.yaml` and `.trainee/tuning.yaml`
 
-The config file is the source of truth for CLI, Web UI, and tool API runs.
+These files are the source of truth for CLI, Web UI, and tool API runs. At runtime Trainee loads both files and compiles them into one immutable `ProjectSpec` for the session.
 
-Example:
+Example `.trainee/project.yaml`:
 
 ```yaml
 version: 1
@@ -146,21 +147,6 @@ run:
   fixed_args:
     - flag: --max-iter
       value: 1000
-
-tuning:
-  params:
-    - name: lr
-      flag: --lr
-      type: float
-      default: 0.001
-      min_value: 0.00001
-      max_value: 0.01
-    - name: theta_weight
-      config_path: fit.term_weights.theta
-      type: float
-      default: 9.0
-      min_value: 1.0
-      max_value: 15.0
 
 metrics:
   specs:
@@ -190,6 +176,27 @@ advanced:
   tuning_prompt: "Change only one high-impact parameter per round unless the evidence is strong."
 ```
 
+Example `.trainee/tuning.yaml`:
+
+```yaml
+version: 1
+
+params:
+  - name: lr
+    flag: --lr
+    type: float
+    default: 0.001
+    min_value: 0.00001
+    max_value: 0.01
+  - name: theta_weight
+    config_path: fit.term_weights.theta
+    type: float
+    min_value: 1.0
+    max_value: 15.0
+```
+
+For config-backed params, Trainee reads the initial value from `launch.baseline_config`. Do not duplicate baseline defaults in `tuning.yaml`.
+
 ### Launch environments
 
 `launch.environment` controls how `launch.command` is wrapped:
@@ -207,13 +214,13 @@ Trainee appends arguments in this order:
 2. `launch.args`.
 3. `data` entries that have a `flag`.
 4. `run.fixed_args`.
-5. Agent-controlled `tuning.params`.
+5. Agent-controlled CLI params from `tuning.yaml`.
 
-Only `tuning.params` may be changed by the agent. `run.fixed_args` stay constant across every round and exclude matching names, flags, or config path keys from `tuning.params`.
+Only `tuning.yaml` params may be changed by the agent. `launch.args` and `run.fixed_args` stay constant across every round and exclude matching names, flags, or config path keys from tuning discovery.
 
-`trainee init --baseline-config ...` writes discovered parameters directly into the new project config and reminds you to review them. `trainee suggest-tunables` can rerun discovery later. The Web UI keeps an explicit review step before saving suggestions, and the tool API exposes separate suggest/apply calls.
+`trainee init --baseline-config ...` writes discovered parameters into `.trainee/tuning.yaml` and reminds you to review them. `trainee tunables discover` can rerun discovery later. The Web UI keeps an explicit review step before saving suggestions, and the tool API exposes separate suggest/apply calls.
 
-Use `tuning.params[].config_path` for agent-controlled edits to fields inside `launch.baseline_config`. Config-backed tunable parameters are written into the generated per-round config and are not appended as CLI flags. If `tuning.params` is empty, Trainee still writes the per-round config unchanged; the agent simply has no approved parameters to change.
+Use `params[].config_path` in `tuning.yaml` for agent-controlled edits to fields inside `launch.baseline_config`. Config-backed tunable parameters are written into the generated per-round config and are not appended as CLI flags. If `params` is empty, Trainee still writes the per-round config unchanged; the agent simply has no approved parameters to change.
 
 For commands that cannot be expressed structurally, use `advanced.shell_command`. Include `{extra_args}` where the generated tunable parameters should be inserted.
 
@@ -257,7 +264,7 @@ If `metrics.specs` is empty, at least `loss` or `total_loss` must be found. If r
 
 The first completed round is treated as the baseline. Later rounds are compared against both the baseline and best-so-far round.
 
-If no `tuning.params` are configured, Trainee runs the latest result collection and then stops because there is nothing safe for the agent to change.
+If no `tuning.yaml` params are configured, Trainee runs the latest result collection and then stops because there is nothing safe for the agent to change.
 
 ## Runtime outputs
 
@@ -355,6 +362,7 @@ Use `advanced.tuning_prompt` for run-specific tuning strategy.
 ```bash
 trainee version
 trainee init [project_root] [--baseline-config PATH] [--force]
+trainee tunables discover [project_root] [--apply] [--replace] [--limit N]
 trainee doctor [project_root]
 trainee run [project_root] [--dry-run] [--guarded | --unsafe]
 trainee webui [--host HOST] [--port PORT] [--reload] [--no-open]
@@ -367,7 +375,6 @@ trainee report SESSION_ID [--output report.md]
 Notes:
 
 - Running `trainee` with no subcommand starts the local service, equivalent to `trainee serve`.
-- `trainee launch` is kept as a compatibility alias for `trainee init`.
 - `trainee run --dry-run` runs preflight checks and prints the baseline command without creating a runtime database.
 - `trainee doctor` fails before a session starts if data paths, environment, launcher, sandbox paths, or config validation are not ready.
 
@@ -382,7 +389,7 @@ trainee webui
 The UI can:
 
 - Register or edit a training project.
-- Save the same `.trainee/project.yaml` used by the CLI.
+- Save the same `.trainee/project.yaml` and `.trainee/tuning.yaml` used by the CLI.
 - Start, stop, and inspect the loop.
 - Preview the next decision prompt.
 - Edit provider settings and the global system prompt.
@@ -446,17 +453,17 @@ Common tools:
 - `runs_get`
 - `session_report`
 
-`project_register` accepts the same structure as `.trainee/project.yaml` plus a top-level `project_root`. It writes the normalized config back to that project.
+`project_register` accepts the same project fields plus `tuning` and a top-level `project_root`. It writes normalized `.trainee/project.yaml` and `.trainee/tuning.yaml` files back to that project.
 
 ## Formal-use checklist
 
 Before using Trainee on a real training project:
 
 1. Commit or otherwise save the training project state.
-2. Run `trainee init` and review `.trainee/project.yaml`.
+2. Run `trainee init` and review `.trainee/project.yaml` plus `.trainee/tuning.yaml`.
 3. Confirm `data` paths exist and stay inside the project root.
 4. Confirm `launch.command`, `launch.baseline_config`, `launch.args`, and `run.fixed_args` reproduce the intended baseline command.
-5. Confirm only safe parameters are listed in `tuning.params`.
+5. Confirm only safe parameters are listed in `.trainee/tuning.yaml`.
 6. Confirm metrics can be parsed from stdout, `.trainee/` logs, JSONL, or W&B summary.
 7. For guarded mode, make the training job write logs, checkpoints, W&B files, and caches under `.trainee/`.
 8. Run `trainee doctor`.

@@ -46,7 +46,7 @@ class ContextBuilder:
         if detected_data_dirs:
             data_lines.append("Detected project data directories: " + ", ".join(detected_data_dirs))
         if spec.log_paths:
-            data_lines.append("Configured legacy log paths: " + ", ".join(spec.log_paths))
+            data_lines.append("Configured log paths: " + ", ".join(spec.log_paths))
         if spec.signal_log_paths():
             data_lines.append("Configured signal log paths: " + ", ".join(spec.signal_log_paths()))
         if spec.metric_log_paths():

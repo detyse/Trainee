@@ -72,6 +72,12 @@ class TunableDiscoveryResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class TunableApplySkip(BaseModel):
+    name: str
+    target: str
+    reason: str
+
+
 class TunableDiscoveryEngine:
     def __init__(self, settings: Settings, decision_engine: Optional[DecisionEngine] = None) -> None:
         self.settings = settings
@@ -182,27 +188,57 @@ def apply_tunable_suggestions(
     *,
     replace: bool = False,
 ) -> tuple[ProjectConfig, list[TunableParam]]:
+    updated, applied, _ = apply_tunable_suggestions_with_report(config, suggestions, replace=replace)
+    return updated, applied
+
+
+def apply_tunable_suggestions_with_report(
+    config: ProjectConfig,
+    suggestions: Iterable[TunableParamSuggestion],
+    *,
+    replace: bool = False,
+) -> tuple[ProjectConfig, list[TunableParam], list[TunableApplySkip]]:
     params = [] if replace else list(config.tuning.params)
     existing_names = {item.name for item in params}
     existing_targets = {(item.config_path or item.flag or "") for item in params}
-    exclusions = fixed_arg_exclusions(config.run.fixed_args)
+    exclusions = fixed_arg_exclusions([*config.launch.args, *config.run.fixed_args])
     applied: list[TunableParam] = []
+    skipped: list[TunableApplySkip] = []
 
     for suggestion in suggestions:
-        param = suggestion.to_tunable_param()
+        param = _normalize_applied_param(suggestion.to_tunable_param(), existing_names)
         target = param.config_path or param.flag or ""
-        if (
-            param.name in existing_names
-            or target in existing_targets
-            or tunable_excluded_by_fixed_args(param, exclusions)
-        ):
+        if target in existing_targets:
+            skipped.append(TunableApplySkip(name=param.name, target=target, reason="target already exists"))
+            continue
+        if tunable_excluded_by_fixed_args(param, exclusions):
+            skipped.append(TunableApplySkip(name=param.name, target=target, reason="excluded by fixed args"))
             continue
         params.append(param)
         applied.append(param)
         existing_names.add(param.name)
         existing_targets.add(target)
 
-    return config.model_copy(update={"tuning": TuningConfig(params=params)}), applied
+    return config.model_copy(update={"tuning": TuningConfig(params=params)}), applied, skipped
+
+
+def _normalize_applied_param(param: TunableParam, existing_names: set[str]) -> TunableParam:
+    payload = param.model_dump(mode="python")
+    if param.config_path:
+        payload["default"] = None
+    if param.name in existing_names:
+        payload["name"] = _unique_name(_param_name(param.config_path) if param.config_path else param.name, existing_names)
+    return TunableParam.model_validate(payload)
+
+
+def _unique_name(base: str, existing_names: set[str]) -> str:
+    name = base or "tunable_param"
+    if name not in existing_names:
+        return name
+    index = 2
+    while f"{name}_{index}" in existing_names:
+        index += 1
+    return f"{name}_{index}"
 
 
 def _load_baseline_mapping(spec: ProjectSpec) -> dict[str, Any]:
@@ -310,7 +346,13 @@ def _bounds_for(value: int | float, path: str) -> tuple[Optional[float], Optiona
 
 def _param_name(path: str) -> str:
     parts = [part for part in path.split(".") if not part.isdigit()]
-    if len(parts) >= 2 and parts[-2] in {"term_weights", "keypoint_weights", "bone_weights"}:
+    if "stages" in parts:
+        stage_index = parts.index("stages")
+        if stage_index + 1 < len(parts):
+            raw = "_".join([parts[stage_index + 1], parts[-1]])
+        else:
+            raw = "_".join(parts[-3:])
+    elif len(parts) >= 2 and parts[-2] in {"term_weights", "keypoint_weights", "bone_weights"}:
         raw = "_".join(parts[-2:])
     elif len(parts) >= 3 and parts[-3] == "stages":
         raw = "_".join(parts[-2:])
@@ -369,7 +411,7 @@ def _discovery_user_prompt(
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
     payload = {
-        "task": "Choose candidate tuning.params for a two-stage approval workflow.",
+        "task": "Choose candidate tuning.yaml params for a two-stage approval workflow.",
         "limit": limit,
         "project_context": context.model_dump(mode="json"),
         "tuning_prompt": spec.tuning_prompt,

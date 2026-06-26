@@ -94,6 +94,13 @@ class TunableParam(BaseModel):
                 raise ValueError(f"value for {self.name} cannot be greater than {self.max_value}")
         return normalized
 
+    def target_key(self) -> str:
+        if self.config_path:
+            return f"config:{self.config_path}"
+        if self.flag:
+            return f"cli:{self.flag}"
+        return f"name:{self.name}"
+
 
 class MetricSpec(BaseModel):
     name: str
@@ -169,6 +176,14 @@ class ProjectSpec(BaseModel):
             raise ValueError("round_timeout_sec must be positive when set")
         if self.max_rounds <= 0:
             raise ValueError("max_rounds must be positive")
+        names = [item.name for item in self.tunable_params]
+        duplicate_names = sorted({name for name in names if names.count(name) > 1})
+        if duplicate_names:
+            raise ValueError("tunable_params names must be unique: " + ", ".join(duplicate_names))
+        targets = [item.target_key() for item in self.tunable_params]
+        duplicate_targets = sorted({target for target in targets if targets.count(target) > 1})
+        if duplicate_targets:
+            raise ValueError("tunable_params targets must be unique: " + ", ".join(duplicate_targets))
         return self
 
     def param_index(self) -> Dict[str, TunableParam]:
@@ -221,7 +236,7 @@ class ProjectSpec(BaseModel):
                     paths.append(metric.path)
         return _dedupe(paths)
 
-    def legacy_log_paths_for_metrics(self) -> List[str]:
+    def fallback_log_paths_for_metrics(self) -> List[str]:
         return list(self.log_paths)
 
     def uses_generated_config(self) -> bool:

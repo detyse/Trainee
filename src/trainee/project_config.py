@@ -11,6 +11,7 @@ from typing import Any, Iterable, Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from trainee.config_paths import get_config_value
 from trainee.models import MetricSpec, ProjectSpec, SecurityMode, SignalSource, TunableParam
 
 
@@ -80,6 +81,7 @@ class RunConfig(BaseModel):
 
 
 class TuningConfig(BaseModel):
+    version: Literal[1] = 1
     params: list[TunableParam] = Field(default_factory=list)
 
 
@@ -117,14 +119,14 @@ class ProjectConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_fixed_args_exclude_tunables(self) -> "ProjectConfig":
-        exclusions = fixed_arg_exclusions(self.run.fixed_args)
+        exclusions = fixed_arg_exclusions([*self.launch.args, *self.run.fixed_args])
         conflicts = [
             item.name
             for item in self.tuning.params
             if tunable_excluded_by_fixed_args(item, exclusions)
         ]
         if conflicts:
-            raise ValueError("tuning.params must not include run.fixed_args: " + ", ".join(conflicts))
+            raise ValueError("tuning.yaml params must not include fixed launch/run args: " + ", ".join(conflicts))
         return self
 
 
@@ -166,6 +168,10 @@ def project_config_path(project_root: str | Path) -> Path:
     return Path(project_root).expanduser().resolve() / ".trainee" / "project.yaml"
 
 
+def tuning_config_path(project_root: str | Path) -> Path:
+    return Path(project_root).expanduser().resolve() / ".trainee" / "tuning.yaml"
+
+
 def load_project_config(project_root: str | Path) -> ProjectConfig:
     path = project_config_path(project_root)
     if not path.is_file():
@@ -176,7 +182,28 @@ def load_project_config(project_root: str | Path) -> ProjectConfig:
         raise ValueError(f"{path} is invalid YAML: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"{path} must contain a YAML mapping")
-    return ProjectConfig.model_validate(payload)
+    if "tuning" in payload:
+        raise ValueError(f"{path} must not contain tuning; use {tuning_config_path(project_root)}")
+    config = ProjectConfig.model_validate(payload)
+    tuning_path = tuning_config_path(project_root)
+    if tuning_path.is_file():
+        config = config.model_copy(update={"tuning": load_tuning_config(project_root)})
+    return config
+
+
+def load_tuning_config(project_root: str | Path) -> TuningConfig:
+    path = tuning_config_path(project_root)
+    if not path.is_file():
+        return TuningConfig()
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path} is invalid YAML: {exc}") from exc
+    if payload is None:
+        return TuningConfig()
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a YAML mapping")
+    return TuningConfig.model_validate(payload)
 
 
 def save_project_config(project_root: str | Path, config: ProjectConfig) -> Path:
@@ -186,6 +213,17 @@ def save_project_config(project_root: str | Path, config: ProjectConfig) -> Path
     _atomic_write(
         path,
         render_project_config_yaml(normalized).encode("utf-8"),
+    )
+    save_tuning_config(root, normalized.tuning)
+    return path
+
+
+def save_tuning_config(project_root: str | Path, tuning: TuningConfig) -> Path:
+    root = Path(project_root).expanduser().resolve()
+    path = tuning_config_path(root)
+    _atomic_write(
+        path,
+        render_tuning_config_yaml(tuning).encode("utf-8"),
     )
     return path
 
@@ -201,8 +239,20 @@ def restore_project_config(project_root: str | Path, previous: Optional[bytes]) 
     _atomic_write(path, previous)
 
 
+def restore_tuning_config(project_root: str | Path, previous: Optional[bytes]) -> None:
+    path = tuning_config_path(project_root)
+    if previous is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    _atomic_write(path, previous)
+
+
 def render_project_config_yaml(config: ProjectConfig) -> str:
     payload = config.model_dump(mode="json", exclude_none=True)
+    payload.pop("tuning", None)
     launch = config.launch.model_dump(mode="json", exclude_none=True)
     launch_payload: dict[str, Any] = {
         "environment": launch["environment"],
@@ -213,6 +263,19 @@ def render_project_config_yaml(config: ProjectConfig) -> str:
     launch_payload["baseline_config"] = config.launch.baseline_config
     launch_payload["args"] = launch["args"]
     payload["launch"] = launch_payload
+    return yaml.safe_dump(
+        payload,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+
+
+def render_tuning_config_yaml(tuning: TuningConfig) -> str:
+    payload = tuning.model_dump(mode="json", exclude_none=True)
+    for item in payload.get("params", []):
+        if item.get("config_path"):
+            item.pop("default", None)
     return yaml.safe_dump(
         payload,
         sort_keys=False,
@@ -244,6 +307,7 @@ def compile_project_spec(
     working_dir = _resolve_project_path(root, config.advanced.working_dir or ".")
     launcher = _render_launcher(root, config)
     baseline_config_path = str(_resolve_project_path(root, config.launch.baseline_config)) if config.launch.baseline_config else None
+    tunable_params = _resolve_config_tunable_defaults(config.tuning.params, baseline_config_path)
     return ProjectSpec(
         project_root=str(root),
         working_dir=str(working_dir),
@@ -258,7 +322,7 @@ def compile_project_spec(
         kill_on_stall=config.advanced.kill_on_stall,
         round_timeout_sec=config.run.timeout_minutes * 60 if config.run.timeout_minutes is not None else None,
         max_rounds=config.run.max_rounds,
-        tunable_params=config.tuning.params,
+        tunable_params=tunable_params,
         baseline_config_path=baseline_config_path,
         metric_specs=config.metrics.specs,
         metric_prompt=config.metrics.prompt,
@@ -323,31 +387,6 @@ def registration_payload(project_root: str | Path, config: ProjectConfig) -> dic
     return {"project_root": str(Path(project_root).expanduser().resolve()), **config.model_dump(mode="json")}
 
 
-def project_config_from_spec(spec: ProjectSpec) -> ProjectConfig:
-    return ProjectConfig(
-        data=[DataInput(path=path) for path in spec.data_paths],
-        launch=LaunchConfig(environment="system", command=["python", "train.py"]),
-        run=RunConfig(
-            max_rounds=spec.max_rounds,
-            timeout_minutes=spec.round_timeout_sec / 60 if spec.round_timeout_sec is not None else None,
-        ),
-        tuning=TuningConfig(params=spec.tunable_params),
-        metrics=MetricsConfig(specs=spec.metric_specs, prompt=spec.metric_prompt),
-        advanced=AdvancedConfig(
-            security_mode=spec.security_mode,
-            working_dir=spec.working_dir,
-            heartbeat_interval_sec=spec.heartbeat_interval_sec,
-            stall_timeout_sec=spec.stall_timeout_sec,
-            kill_on_stall=spec.kill_on_stall,
-            signal_sources=spec.signal_sources,
-            log_paths=spec.log_paths,
-            wandb_enabled=spec.wandb_enabled,
-            tuning_prompt=spec.tuning_prompt,
-            shell_command=spec.launcher_template,
-        ),
-    )
-
-
 def _render_launcher(project_root: Path, config: ProjectConfig) -> str:
     if config.advanced.shell_command:
         parts = [config.advanced.shell_command.strip()]
@@ -388,6 +427,44 @@ def _render_launcher(project_root: Path, config: ProjectConfig) -> str:
 
 def _uses_generated_config(config: ProjectConfig) -> bool:
     return bool(config.launch.baseline_config)
+
+
+def _resolve_config_tunable_defaults(
+    params: list[TunableParam],
+    baseline_config_path: Optional[str],
+) -> list[TunableParam]:
+    if not params:
+        return []
+    baseline: Optional[dict[str, Any]] = None
+    resolved: list[TunableParam] = []
+    for param in params:
+        if not param.config_path:
+            resolved.append(param)
+            continue
+        if baseline_config_path is None:
+            raise ValueError(f"tuning param {param.name} uses config_path but launch.baseline_config is not set")
+        if baseline is None:
+            baseline = _load_yaml_mapping(Path(baseline_config_path))
+        try:
+            default = get_config_value(baseline, param.config_path)
+        except ValueError as exc:
+            raise ValueError(f"tuning param {param.name} config_path is not in launch.baseline_config: {param.config_path}") from exc
+        payload = param.model_dump(mode="python")
+        payload["default"] = default
+        resolved.append(TunableParam.model_validate(payload))
+    return resolved
+
+
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"baseline config is invalid YAML: {path}: {exc}") from exc
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"baseline config must contain a YAML mapping: {path}")
+    return payload
 
 
 def _quote_command(command: list[str]) -> str:

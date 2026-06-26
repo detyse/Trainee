@@ -18,7 +18,9 @@ from trainee.project_config import (
     compile_project_spec,
     default_project_config,
     detect_project,
+    load_project_config,
     save_project_config,
+    tuning_config_path,
 )
 from trainee.storage import Storage
 
@@ -96,7 +98,16 @@ def test_config_backed_tunables_use_generated_round_config(tmp_path: Path) -> No
     project = tmp_path / "project"
     project.mkdir()
     (project / "configs").mkdir()
-    (project / "configs" / "base.yaml").write_text("data:\n  max_frames: null\n", encoding="utf-8")
+    (project / "configs" / "base.yaml").write_text(
+        """
+data:
+  max_frames: null
+fit:
+  term_weights:
+    theta: 8.0
+""".lstrip(),
+        encoding="utf-8",
+    )
     config = ProjectConfig(
         launch=LaunchConfig(
             command=["python", "-m", "src.run_fitting"],
@@ -120,6 +131,7 @@ def test_config_backed_tunables_use_generated_round_config(tmp_path: Path) -> No
     command = TrainingExecutor().render_command(spec, {"theta_weight": 10.0}, session_id=3, round_index=2)
 
     assert spec.uses_generated_config()
+    assert spec.default_params()["theta_weight"] == 8.0
     assert f"--config {project}/.trainee/runs/session-0003/round-0002/config.yaml" in command
     assert str(project / "configs" / "base.yaml") not in command
     assert "theta_weight" not in command
@@ -168,7 +180,7 @@ def test_fixed_args_exclude_matching_tunable_flags_and_names() -> None:
         {"name": "other", "flag": "--max-iter", "type": "int"},
         {"name": "global_iterations", "config_path": "fit.stages.global.max_iters", "type": "int"},
     ):
-        with pytest.raises(ValueError, match="tuning.params must not include run.fixed_args"):
+        with pytest.raises(ValueError, match="tuning.yaml params must not include fixed launch/run args"):
             ProjectConfig(
                 launch=LaunchConfig(command=["python", "train.py"]),
                 run=RunConfig(fixed_args=[CommandArg(flag="--max-iter", value=1000)]),
@@ -230,9 +242,33 @@ def test_save_project_config_uses_atomic_replace_and_keeps_null_baseline(tmp_pat
     )
 
     assert calls
-    assert calls[-1][1] == path
+    assert path in {destination for _, destination in calls}
+    assert tuning_config_path(project) in {destination for _, destination in calls}
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert payload["launch"]["baseline_config"] is None
+    assert "tuning" not in payload
+    tuning_payload = yaml.safe_load(tuning_config_path(project).read_text(encoding="utf-8"))
+    assert tuning_payload["params"] == []
+
+
+def test_project_yaml_must_not_embed_tuning(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    trainee_dir = project / ".trainee"
+    trainee_dir.mkdir(parents=True)
+    (trainee_dir / "project.yaml").write_text(
+        """
+version: 1
+launch:
+  environment: system
+  command: [python, train.py]
+tuning:
+  params: []
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must not contain tuning"):
+        load_project_config(project)
 
 
 def test_baseline_config_must_exist_inside_project(tmp_path: Path) -> None:
@@ -339,7 +375,10 @@ def test_web_ui_saves_the_same_project_yaml(runtime_env) -> None:
     assert payload["data"] == [{"path": "data", "flag": "--data-root"}]
     assert payload["launch"]["baseline_config"] == "configs/base.yaml"
     assert payload["run"]["fixed_args"] == [{"flag": "--max-iter", "value": 10}]
-    assert payload["tuning"]["params"][0]["config_path"] == "lr"
+    assert "tuning" not in payload
+    tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
+    assert tuning_payload["params"][0]["config_path"] == "lr"
+    assert "default" not in tuning_payload["params"][0]
     assert client.get("/api/project").json()["config"]["run"]["max_rounds"] == 2
 
 
@@ -373,7 +412,9 @@ def test_api_registration_failure_restores_previous_project_yaml(runtime_env, mo
     }
     assert client.post("/api/project/register", json=registration).status_code == 200
     path = project / ".trainee" / "project.yaml"
+    tuning_path = project / ".trainee" / "tuning.yaml"
     previous = path.read_bytes()
+    previous_tuning = tuning_path.read_bytes()
 
     def fail_registration(*args, **kwargs):
         raise ValueError("simulated registration failure")
@@ -384,6 +425,7 @@ def test_api_registration_failure_restores_previous_project_yaml(runtime_env, mo
 
     assert response.status_code == 400
     assert path.read_bytes() == previous
+    assert tuning_path.read_bytes() == previous_tuning
     assert runtime.storage.get_project_spec().max_rounds == 2
 
 

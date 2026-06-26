@@ -236,7 +236,7 @@ def test_loop_generates_round_config_from_tunables(runtime_env, wait_for):
     baseline_config.write_text(
         """
 data:
-  max_frames: null
+  max_frames: 5
 fit:
   term_weights:
     theta: 9.0
@@ -337,8 +337,8 @@ print(f"max_frames={max_frames} theta={theta} total_loss={float(max_frames):.1f}
     assert str(round_config) in runs_payload["rounds"][0]["resolved_command"]
     assert str(baseline_config) not in runs_payload["rounds"][0]["resolved_command"]
     assert generated["data"]["max_frames"] == 5
-    assert generated["fit"]["term_weights"]["theta"] == 11.0
-    assert original["data"]["max_frames"] is None
+    assert generated["fit"]["term_weights"]["theta"] == 9.0
+    assert original["data"]["max_frames"] == 5
     assert original["fit"]["term_weights"]["theta"] == 9.0
 
 

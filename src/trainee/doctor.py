@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from trainee.models import ProjectSpec, TunableParam
 from trainee.executor import TrainingExecutor
-from trainee.project_config import compile_project_spec, load_project_config
+from trainee.project_config import compile_project_spec, load_project_config, tuning_config_path
 from trainee.security import SANDBOX_DIRS
 from trainee.settings import Settings, load_settings
 
@@ -131,9 +131,11 @@ def _check_project(project_root: Path, security_mode: str | None = None) -> tupl
 
     trainee_dir = project_root / ".trainee"
     project_yaml = trainee_dir / "project.yaml"
+    tuning_yaml = tuning_config_path(project_root)
     for path, label in (
         (trainee_dir, ".trainee exists"),
         (project_yaml, ".trainee/project.yaml exists"),
+        (tuning_yaml, ".trainee/tuning.yaml exists"),
         (trainee_dir / "runs", ".trainee/runs exists"),
         (trainee_dir / "logs", ".trainee/logs exists"),
     ):

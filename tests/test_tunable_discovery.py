@@ -187,5 +187,8 @@ fit:
     )
 
     assert applied.status_code == 200
-    saved = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
-    assert saved["tuning"]["params"][0]["config_path"] == suggestions[0]["config_path"]
+    project_saved = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
+    saved = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
+    assert "tuning" not in project_saved
+    assert saved["params"][0]["config_path"] == suggestions[0]["config_path"]
+    assert "default" not in saved["params"][0]

@@ -46,12 +46,12 @@ def parse_metrics_from_sources(
     metrics: Dict[str, float] = {}
     source_paths: List[str] = []
 
-    legacy_log_paths = _resolve_existing_paths(spec.legacy_log_paths_for_metrics(), spec)
-    legacy_log_text = "\n".join(_read_text(path) for path in legacy_log_paths)
-    if legacy_log_paths:
-        source_paths.extend(str(path) for path in legacy_log_paths)
+    fallback_log_paths = _resolve_existing_paths(spec.fallback_log_paths_for_metrics(), spec)
+    fallback_log_text = "\n".join(_read_text(path) for path in fallback_log_paths)
+    if fallback_log_paths:
+        source_paths.extend(str(path) for path in fallback_log_paths)
 
-    default_log_text = "\n".join(text for text in (internal_log_text, legacy_log_text) if text)
+    default_log_text = "\n".join(text for text in (internal_log_text, fallback_log_text) if text)
     for name, pattern in LOSS_PATTERNS.items():
         value = _extract_last_match(pattern, default_log_text)
         if value is not None:
@@ -120,7 +120,7 @@ def _resolve_metric_from_sources(
         paths = _resolve_existing_paths(_metric_configured_paths(metric), spec)
         return _extract_jsonl_metric(paths, metric.key_or_pattern or metric.name), paths
     if metric.source == "log_regex":
-        paths = _resolve_existing_paths(spec.legacy_log_paths_for_metrics(), spec)
+        paths = _resolve_existing_paths(spec.fallback_log_paths_for_metrics(), spec)
         log_text = "\n".join(text for text in [internal_log_text, *[_read_text(path) for path in paths]] if text)
         return _resolve_metric_from_text(metric, log_text, wandb_summary), paths
     return _resolve_metric_from_text(metric, internal_log_text, wandb_summary), []

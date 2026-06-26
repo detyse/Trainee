@@ -19,7 +19,7 @@ from starlette.datastructures import FormData
 
 from trainee.events import EventBus
 from trainee.logging import configure_logging, get_logger
-from trainee.models import ProjectContext, ProjectSpec, PromptPreset
+from trainee.models import ProjectContext, PromptPreset
 from trainee.orchestrator import RuntimeService
 from trainee.project_config import (
     AdvancedConfig,
@@ -35,9 +35,10 @@ from trainee.project_config import (
     load_project_config,
     normalized_project_config,
     project_config_path,
-    project_config_from_spec,
     restore_project_config,
+    restore_tuning_config,
     save_project_config,
+    tuning_config_path,
 )
 from trainee.providers import (
     DEFAULT_ANTHROPIC_BASE_URL,
@@ -207,14 +208,9 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     async def api_register_project(request: Request, payload: Dict[str, Any]) -> JSONResponse:
         runtime = get_runtime(request)
         try:
-            if "launch" in payload:
-                registration = ProjectRegistration.model_validate(payload)
-                project_root = Path(registration.project_root).expanduser().resolve()
-                config = ProjectConfig.model_validate(registration.model_dump(exclude={"project_root"}))
-            else:
-                legacy_spec = ProjectSpec.model_validate(payload)
-                project_root = Path(legacy_spec.project_root).expanduser().resolve()
-                config = project_config_from_spec(legacy_spec)
+            registration = ProjectRegistration.model_validate(payload)
+            project_root = Path(registration.project_root).expanduser().resolve()
+            config = ProjectConfig.model_validate(registration.model_dump(exclude={"project_root"}))
             bundle = await _register_project_config(runtime, project_root, config)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -260,6 +256,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         bundle = runtime.get_bundle().model_dump(mode="json")
         bundle["config"] = payload["project_config"].model_dump(mode="json") if payload["project_config"] else None
         bundle["config_path"] = payload["project_config_path"]
+        bundle["tuning_config_path"] = payload.get("tuning_config_path")
         return JSONResponse(bundle)
 
     @app.post("/api/project/tunables/suggest")
@@ -274,7 +271,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 spec,
                 context,
                 limit=limit,
-                fixed_args=config.run.fixed_args,
+                fixed_args=[*config.launch.args, *config.run.fixed_args],
             )
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -511,7 +508,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             result = await TunableDiscoveryEngine(runtime.settings).suggest(
                 spec,
                 context,
-                fixed_args=config.run.fixed_args,
+                fixed_args=[*config.launch.args, *config.run.fixed_args],
             )
             suggested_config, _ = apply_tunable_suggestions(config, result.suggestions)
             suggested_spec = compile_project_spec(project_root, normalized_project_config(project_root, suggested_config))
@@ -521,6 +518,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         payload["project_config"] = suggested_config
         payload["spec"] = suggested_spec
         payload["project_config_path"] = str(project_config_path(project_root))
+        payload["tuning_config_path"] = str(tuning_config_path(project_root))
         payload["tunable_discovery"] = result
         return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
 
@@ -789,7 +787,7 @@ async def _render_tunable_review_response(
     result = await TunableDiscoveryEngine(runtime.settings).suggest(
         spec,
         context,
-        fixed_args=config.run.fixed_args,
+        fixed_args=[*config.launch.args, *config.run.fixed_args],
     )
     suggested_config, applied = apply_tunable_suggestions(config, result.suggestions)
     if not applied:
@@ -800,6 +798,7 @@ async def _render_tunable_review_response(
     payload["project_config"] = suggested_config
     payload["spec"] = suggested_spec
     payload["project_config_path"] = str(project_config_path(project_root))
+    payload["tuning_config_path"] = str(tuning_config_path(project_root))
     payload["tunable_discovery"] = result
     return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
 
@@ -813,12 +812,15 @@ async def _register_project_config(
     spec = compile_project_spec(project_root, normalized)
     context = runtime.prepare_project_registration(spec)
     path = project_config_path(project_root)
+    tuning_path = tuning_config_path(project_root)
     previous = path.read_bytes() if path.is_file() else None
+    previous_tuning = tuning_path.read_bytes() if tuning_path.is_file() else None
     try:
         save_project_config(project_root, normalized)
         return await runtime.register_project(spec, context=context)
     except Exception:
         restore_project_config(project_root, previous)
+        restore_tuning_config(project_root, previous_tuning)
         raise
 
 
@@ -850,33 +852,6 @@ def _project_config_from_discovery_payload(
 
 def _project_config_from_form(form: FormData) -> tuple[Path, ProjectConfig]:
     project_root = Path(_form_str(form, "project_root")).expanduser().resolve()
-    legacy_launcher = _form_str(form, "launcher_template")
-    if legacy_launcher:
-        def legacy_json(name: str) -> Any:
-            try:
-                return json.loads(_form_str(form, name, "[]") or "[]")
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{name} must be valid JSON") from exc
-
-        spec = ProjectSpec(
-            project_root=str(project_root),
-            working_dir=_form_str(form, "working_dir", str(project_root)),
-            launcher_template=legacy_launcher,
-            security_mode=_form_str(form, "security_mode", "guarded"),
-            data_paths=legacy_json("data_paths_json"),
-            log_paths=legacy_json("log_paths_json"),
-            signal_sources=legacy_json("signal_sources_json"),
-            wandb_enabled=_form_checkbox(form, "wandb_enabled"),
-            heartbeat_interval_sec=_form_float(form, "heartbeat_interval_sec", 5.0),
-            stall_timeout_sec=_form_float(form, "stall_timeout_sec", 120.0),
-            max_rounds=_form_int(form, "max_rounds", 3),
-            tunable_params=legacy_json("tunable_params_json"),
-            metric_specs=legacy_json("metric_specs_json"),
-            metric_prompt=_form_str(form, "metric_prompt"),
-            tuning_prompt=_form_str(form, "tuning_prompt"),
-        )
-        return project_root, project_config_from_spec(spec)
-
     command = shlex.split(_form_str(form, "launch_command"))
     data = []
     for line in _nonempty_lines(_form_str(form, "data_lines")):
@@ -969,11 +944,6 @@ def _coerce_scalar(raw: str) -> Any:
 def _form_str(form: FormData, key: str, default: str = "") -> str:
     value = form.get(key, default)
     return str(value) if value is not None else default
-
-
-def _form_float(form: FormData, key: str, default: float) -> float:
-    raw = _form_str(form, key, str(default))
-    return float(raw or default)
 
 
 def _form_int(form: FormData, key: str, default: int) -> int:

@@ -14,7 +14,14 @@ from trainee.logging import get_logger
 from trainee.models import EventMessage, LoopSnapshot, ProjectBundle, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
 from trainee.parsers import discover_wandb_summary, missing_required_metrics, parse_metrics_from_sources
 from trainee.prompt_documents import PromptDocumentLoader
-from trainee.project_config import ProjectConfig, compile_project_spec, default_project_config, load_project_config, project_config_path
+from trainee.project_config import (
+    ProjectConfig,
+    compile_project_spec,
+    default_project_config,
+    load_project_config,
+    project_config_path,
+    tuning_config_path,
+)
 from trainee.providers import provider_settings_payload
 from trainee.reporter import ReportGenerator
 from trainee.research_state import ResearchStateBuilder
@@ -199,6 +206,7 @@ class RuntimeService:
             "context_is_preview": context_is_preview,
             "project_config": project_config,
             "project_config_path": str(project_config_path(bundle.spec.project_root)) if bundle.spec else "",
+            "tuning_config_path": str(tuning_config_path(bundle.spec.project_root)) if bundle.spec else "",
             "loop": bundle.loop,
             "sessions": sessions,
             "rounds": rounds,
@@ -214,9 +222,6 @@ class RuntimeService:
             "prompt_presets": prompt_presets,
             "prompt_presets_payload": [item.model_dump(mode="json") for item in prompt_presets],
             "runtime_settings": self._runtime_settings_payload(),
-            "tunable_params_json": self._pretty_json([item.model_dump(mode="json") for item in bundle.spec.tunable_params] if bundle.spec else []),
-            "signal_sources_json": self._pretty_json([item.model_dump(mode="json") for item in bundle.spec.signal_sources] if bundle.spec else []),
-            "metric_specs_json": self._pretty_json([item.model_dump(mode="json") for item in bundle.spec.metric_specs] if bundle.spec else []),
         }
 
     def _dashboard_project_config(self, spec: Optional[ProjectSpec]) -> Optional[ProjectConfig]:
@@ -232,7 +237,6 @@ class RuntimeService:
         project_root = self.settings.project_root
         return {
             "launch_project_root": str(project_root) if project_root else "",
-            "launch_launcher_template": self._default_launcher_template(),
             "data_dir": str(self.settings.data_dir),
             "project_data_dir": str(self.settings.project_data_dir),
             "database_path": str(self.settings.database_path),
@@ -270,14 +274,6 @@ class RuntimeService:
         except (OSError, ValueError):
             config = default_project_config(self.settings.project_root)
         return compile_project_spec(self.settings.project_root, config)
-
-    def _default_launcher_template(self) -> str:
-        if self.settings.project_root is None:
-            return ""
-        for relative_path in ("train.py", "main.py", "run.py"):
-            if (self.settings.project_root / relative_path).is_file():
-                return f"python {{project_root}}/{relative_path} {{extra_args}}"
-        return ""
 
     def _create_session_for_start(
         self,

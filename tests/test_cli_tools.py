@@ -60,10 +60,13 @@ def test_init_project_initializes_project_files(tmp_path):
 
     trainee_dir = project / ".trainee"
     project_yaml = yaml.safe_load((trainee_dir / "project.yaml").read_text(encoding="utf-8"))
+    tuning_yaml = yaml.safe_load((trainee_dir / "tuning.yaml").read_text(encoding="utf-8"))
     context_md = (trainee_dir / "context.md").read_text(encoding="utf-8")
     assert project_yaml["launch"]["command"] == ["python", "train.py"]
     assert project_yaml["launch"]["baseline_config"] is None
     assert project_yaml["launch"]["args"] == []
+    assert "tuning" not in project_yaml
+    assert tuning_yaml["params"] == []
     assert project_yaml["advanced"]["security_mode"] == "guarded"
     assert project_yaml["advanced"]["log_paths"] == [".trainee/logs/**/*.log", ".trainee/runs/**/*.log"]
     assert "Toy Model" in context_md
@@ -79,6 +82,7 @@ def test_init_project_detects_initialized_project_and_keeps_files(tmp_path):
     trainee_dir.mkdir(parents=True)
     project_yaml = _minimal_project_yaml()
     (trainee_dir / "project.yaml").write_text(project_yaml, encoding="utf-8")
+    (trainee_dir / "tuning.yaml").write_text("version: 1\nparams: []\n", encoding="utf-8")
     (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
     (trainee_dir / "program.md").write_text("custom rules\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
@@ -89,6 +93,7 @@ def test_init_project_detects_initialized_project_and_keeps_files(tmp_path):
     assert result["files_written"] == []
     assert set(result["files_skipped"]) == {
         trainee_dir / "project.yaml",
+        trainee_dir / "tuning.yaml",
         trainee_dir / "context.md",
         trainee_dir / "README.md",
     }
@@ -102,6 +107,7 @@ def test_init_project_does_not_create_program_for_existing_project(tmp_path):
     trainee_dir.mkdir(parents=True)
     project_yaml = _minimal_project_yaml()
     (trainee_dir / "project.yaml").write_text(project_yaml, encoding="utf-8")
+    (trainee_dir / "tuning.yaml").write_text("version: 1\nparams: []\n", encoding="utf-8")
     (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
 
@@ -152,7 +158,7 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     assert "- Launcher: python train.py {extra_args}" in output
     assert "Tunable discovery" in output
     assert "- Status: skipped (launch.baseline_config is not set)" in output
-    assert "- Review: .trainee/project.yaml tuning.params and .trainee/context.md" in output
+    assert "- Review: .trainee/project.yaml, .trainee/tuning.yaml, and .trainee/context.md" in output
     assert "- Validate: trainee doctor or trainee run --dry-run" in output
     assert "- Next: adjust generated parameters if needed, run `trainee doctor`, then run `trainee run`" in output
     assert "uvicorn" not in output.lower()
@@ -177,13 +183,36 @@ def test_init_command_sets_explicit_baseline_config(tmp_path, capsys, monkeypatc
 
     assert exit_code == 0
     payload = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
+    tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
     assert payload["launch"]["baseline_config"] == "configs/base.yaml"
-    assert payload["tuning"]["params"][0]["config_path"] == "lr"
+    assert "tuning" not in payload
+    assert tuning_payload["params"][0]["config_path"] == "lr"
+    assert "default" not in tuning_payload["params"][0]
     output = capsys.readouterr().out
     assert "- Baseline config: configs/base.yaml" in output
     assert "- Launcher: python train.py --config {config_path} {extra_args}" in output
     assert "- Source: heuristic" in output
-    assert "- Generated: 1 parameter(s) in tuning.params" in output
+    assert "- Generated: 1 parameter(s) in tuning.yaml params" in output
+
+
+def test_tunables_discover_applies_to_tuning_yaml(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
+    project = tmp_path / "toymodel"
+    (project / "configs").mkdir(parents=True)
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (project / "configs" / "base.yaml").write_text("lr: 0.001\n", encoding="utf-8")
+    assert main(["init", str(project), "--baseline-config", "configs/base.yaml"]) == 0
+    (project / ".trainee" / "tuning.yaml").write_text("version: 1\nparams: []\n", encoding="utf-8")
+    capsys.readouterr()
+
+    exit_code = main(["tunables", "discover", str(project), "--apply"])
+
+    output = capsys.readouterr().out
+    tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert "- Applied: 1 to .trainee/tuning.yaml" in output
+    assert tuning_payload["params"][0]["config_path"] == "lr"
 
 
 def test_init_excludes_fixed_args_from_generated_tunables(tmp_path, monkeypatch):
@@ -219,6 +248,7 @@ def test_init_command_reports_already_initialized_project(tmp_path, capsys):
     trainee_dir = project / ".trainee"
     trainee_dir.mkdir(parents=True)
     (trainee_dir / "project.yaml").write_text(_minimal_project_yaml(), encoding="utf-8")
+    (trainee_dir / "tuning.yaml").write_text("version: 1\nparams: []\n", encoding="utf-8")
     (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
     (trainee_dir / "program.md").write_text("custom rules\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
@@ -231,17 +261,23 @@ def test_init_command_reports_already_initialized_project(tmp_path, capsys):
     assert "- Kept: .trainee/project.yaml" in output
 
 
-def test_launch_alias_still_initializes_project(tmp_path, capsys):
+def test_launch_alias_is_removed(tmp_path):
     project = tmp_path / "toymodel"
     project.mkdir()
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
 
-    exit_code = main(["launch", str(project)])
+    with pytest.raises(SystemExit) as exc:
+        main(["launch", str(project)])
 
-    output = capsys.readouterr().out
-    assert exit_code == 0
-    assert "Trainee init" in output
-    assert (project / ".trainee" / "project.yaml").exists()
+    assert exc.value.code == 2
+    assert not (project / ".trainee" / "project.yaml").exists()
+
+
+def test_suggest_tunables_command_is_removed(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        main(["suggest-tunables", str(tmp_path)])
+
+    assert exc.value.code == 2
 
 
 def test_webui_command_opens_browser_and_starts_service(monkeypatch):
@@ -274,7 +310,7 @@ def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.2.0\nLast updated: 2026-06-25 21:17:55 +08:00\n"
+    assert capsys.readouterr().out == "Trainee 0.1.1\nLast updated: 2026-06-26 14:26:01 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):
