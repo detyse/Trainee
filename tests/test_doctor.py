@@ -8,7 +8,7 @@ import yaml
 
 from trainee.cli import init_project, main
 from trainee.doctor import _check_environment, _check_launcher, format_doctor_report, run_doctor
-from trainee.models import ProjectSpec, TunableParam
+from trainee.models import OutputConfig, ProjectSpec, TunableParam
 
 
 def test_doctor_reports_missing_project_scaffold(tmp_path: Path) -> None:
@@ -99,6 +99,24 @@ def test_launcher_analysis_accepts_round_workspace_output(tmp_path: Path) -> Non
 
     assert "output_dir points to .trainee/runs" in messages
     assert not any("may write outside .trainee" in message for message in messages)
+
+
+def test_launcher_analysis_accepts_config_output_path(tmp_path: Path) -> None:
+    spec = ProjectSpec(
+        project_root=str(tmp_path),
+        working_dir=str(tmp_path),
+        launcher_template="python train.py --config {config_path} {extra_args}",
+        output=OutputConfig(config_path="output.root"),
+        tunable_params=[
+            TunableParam(name="lr", flag="--lr", type="float", min_value=0.0, max_value=1.0),
+        ],
+    )
+
+    section = _check_launcher(tmp_path, spec)
+    messages = [finding.message for finding in section.findings]
+
+    assert any(message.startswith("config output path: output.root ->") for message in messages)
+    assert "launcher has no output_dir" not in messages
 
 
 def test_launcher_analysis_accepts_local_python_module(tmp_path: Path) -> None:

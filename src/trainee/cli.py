@@ -20,6 +20,7 @@ from trainee.doctor import format_doctor_report, run_doctor
 from trainee.events import EventBus
 from trainee.models import ProjectContext, PromptPreset
 from trainee.orchestrator import RuntimeService
+from trainee.output_discovery import OutputDiscoveryEngine, OutputDiscoveryResult
 from trainee.project_config import (
     ProjectRegistration,
     compile_project_spec,
@@ -282,6 +283,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_init_result(result)
         return 0
 
+    if command == "prepare":
+        try:
+            result = asyncio.run(prepare_project_async(Path(args.project_root), replace=args.replace))
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        _print_prepare_result(result)
+        return 0
+
     if command == "run":
         try:
             security_mode = "unsafe" if args.unsafe else ("guarded" if args.guarded else None)
@@ -445,26 +455,6 @@ async def initialize_project(
     config = generated_config if generate_config else load_project_config(project_root)
     spec = compile_project_spec(project_root, config)
     context = ContextBuilder().build(spec)
-    tunable_discovery = None
-    applied_tunables = []
-    should_discover_tunables = bool(
-        config.launch.baseline_config
-        and (generate_config or not tuning_path.is_file() or not config.tuning.params)
-    )
-    if should_discover_tunables:
-        settings = load_settings(repo_root=project_root, project_root=project_root)
-        tunable_discovery = await TunableDiscoveryEngine(settings).suggest(
-            spec,
-            context,
-            fixed_args=[*config.launch.args, *config.run.fixed_args],
-        )
-        config, applied_tunables = apply_tunable_suggestions(
-            config,
-            tunable_discovery.suggestions,
-            replace=True,
-        )
-        spec = compile_project_spec(project_root, config)
-        context = ContextBuilder().build(spec)
     files_read = _launch_read_targets(project_root)
 
     outputs = {
@@ -473,16 +463,11 @@ async def initialize_project(
         trainee_dir / "context.md": _render_context_markdown(context),
         trainee_dir / "README.md": _render_launch_readme(project_root, discovery),
     }
-    write_discovered_tuning = tunable_discovery is not None and not generate_config
     already_initialized = all(path.exists() for path in outputs)
     written: list[Path] = []
     skipped: list[Path] = []
     for path, content in outputs.items():
         if path.exists() and not force:
-            if path == tuning_path and write_discovered_tuning:
-                path.write_text(content, encoding="utf-8")
-                written.append(path)
-                continue
             skipped.append(path)
             continue
         path.write_text(content, encoding="utf-8")
@@ -502,8 +487,8 @@ async def initialize_project(
         "already_initialized": already_initialized,
         "launcher_template": spec.launcher_template,
         "discovery": discovery,
-        "tunable_discovery": tunable_discovery,
-        "applied_tunables": applied_tunables,
+        "tunable_discovery": None,
+        "applied_tunables": [],
         "warnings": context.warnings,
     }
 
@@ -520,6 +505,105 @@ def init_project(
             baseline_config=baseline_config,
         )
     )
+
+
+async def prepare_project_async(
+    project_root: Path,
+    *,
+    replace: bool = False,
+) -> dict[str, Any]:
+    project_root = project_root.expanduser().resolve()
+    config_path = project_config_path(project_root)
+    tuning_path = tuning_config_path(project_root)
+    context_path = project_root / ".trainee" / "context.md"
+    config = load_project_config(project_root)
+    spec = compile_project_spec(project_root, config)
+    context = ContextBuilder().build(spec)
+    settings = load_settings(repo_root=project_root, project_root=project_root)
+    output_discovery = OutputDiscoveryResult()
+    if config.output is None:
+        output_discovery = await OutputDiscoveryEngine(settings).suggest(spec, context)
+    output_applied = False
+    if config.launch.baseline_config and config.output is None and output_discovery.output is not None:
+        output_conflicts = [
+            item.name
+            for item in config.tuning.params
+            if item.config_path == output_discovery.output.config_path
+        ]
+        if output_conflicts and not replace:
+            output_discovery = output_discovery.model_copy(
+                update={
+                    "output": None,
+                    "warnings": [
+                        *output_discovery.warnings,
+                        "detected output path is already listed in tuning.yaml; rerun with --replace or edit tuning.yaml.",
+                    ],
+                }
+            )
+        else:
+            config = config.model_copy(update={"output": output_discovery.output})
+            output_applied = True
+            spec = compile_project_spec(project_root, config)
+            context = ContextBuilder().build(spec)
+
+    tunable_discovery = None
+    applied_tunables = []
+    should_discover_tunables = bool(
+        config.launch.baseline_config
+        and (replace or not tuning_path.is_file() or not config.tuning.params)
+    )
+    if should_discover_tunables:
+        tunable_discovery = await TunableDiscoveryEngine(settings).suggest(
+            spec,
+            context,
+            fixed_args=[*config.launch.args, *config.run.fixed_args],
+        )
+        config, applied_tunables = apply_tunable_suggestions(
+            config,
+            tunable_discovery.suggestions,
+            replace=replace or not config.tuning.params,
+        )
+        spec = compile_project_spec(project_root, config)
+        context = ContextBuilder().build(spec)
+
+    files_written: list[Path] = []
+    files_unchanged: list[Path] = []
+    if output_applied:
+        if _write_if_changed(config_path, _render_project_yaml(config)):
+            files_written.append(config_path)
+        else:
+            files_unchanged.append(config_path)
+    if should_discover_tunables:
+        if _write_if_changed(tuning_path, render_tuning_config_yaml(config.tuning)):
+            files_written.append(tuning_path)
+        else:
+            files_unchanged.append(tuning_path)
+    if _write_if_changed(context_path, _render_context_markdown(context)):
+        files_written.append(context_path)
+    else:
+        files_unchanged.append(context_path)
+
+    return {
+        "project_root": project_root,
+        "config_path": config_path,
+        "tuning_config_path": tuning_path,
+        "context_path": context_path,
+        "config": config,
+        "spec": spec,
+        "replace": replace,
+        "files_written": files_written,
+        "files_unchanged": files_unchanged,
+        "output_discovery": output_discovery,
+        "output_applied": output_applied,
+        "tunable_discovery": tunable_discovery,
+        "applied_tunables": applied_tunables,
+        "warnings": context.warnings,
+    }
+
+
+def prepare_project(project_root: Path, *, replace: bool = False) -> dict[str, Any]:
+    return asyncio.run(prepare_project_async(project_root, replace=replace))
+
 
 async def run_project(project_root: Path, security_mode: str | None = None) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
@@ -614,6 +698,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_parser.set_defaults(command="init")
 
+    prepare_parser = subparsers.add_parser("prepare", help="Infer runtime output and tunable config from launch.baseline_config.")
+    prepare_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
+    prepare_parser.add_argument("--replace", action="store_true", help="Replace existing tuning.yaml params with fresh suggestions.")
+    prepare_parser.set_defaults(command="prepare")
+
     run_parser = subparsers.add_parser("run", help="Run the training loop from .trainee/project.yaml.")
     run_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     security_group = run_parser.add_mutually_exclusive_group()
@@ -702,8 +791,6 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
         print("- Status: regenerated project files (--force)")
     elif result["already_initialized"] and not result["files_written"]:
         print("- Status: already initialized; kept existing project files")
-    elif result["tunable_discovery"] is not None and Path(result["config_path"]) in result["files_skipped"]:
-        print("- Status: updated tuning.yaml from existing project config")
     elif result["files_skipped"]:
         print("- Status: added missing project files; kept existing files")
     else:
@@ -756,15 +843,10 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     if not spec.metric_specs:
         metric_summary += " (built-in loss/total_loss parsing only)"
     print(f"- Metrics: {metric_summary}")
+    print(f"- Runtime: round_timeout={timeout}, wandb={'enabled' if spec.wandb_enabled else 'disabled'}")
     print(
-        "- Runtime: "
-        f"kill_on_stall={'true' if spec.kill_on_stall else 'false'}, "
-        f"wandb={'enabled' if spec.wandb_enabled else 'disabled'}"
-    )
-    print(
-        "- Heartbeat: "
+        "- Activity monitor: "
         f"every {_format_number(spec.heartbeat_interval_sec)}s, "
-        f"stall after {_format_number(spec.stall_timeout_sec)}s; "
         f"sources={_format_signal_sources(spec.signal_sources)}"
     )
     print(f"- Log paths: {_joined_or_none(spec.log_paths)}")
@@ -772,15 +854,65 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     print(f"- Launcher: {launcher}")
 
     print("")
+    print("Next")
+    print("- Review: .trainee/project.yaml, .trainee/tuning.yaml, and .trainee/context.md")
+    print("- Prepare: set launch.baseline_config, then run `trainee prepare`")
+    print("- Validate: trainee doctor or trainee run --dry-run")
+    print("- Next: run `trainee prepare`, review generated config, then run `trainee doctor`")
+    for warning in result["warnings"]:
+        print(f"- Warning: {warning}")
+
+
+def _print_prepare_result(result: Mapping[str, Any]) -> None:
+    project_root = Path(result["project_root"])
+    config = result["config"]
+    spec = result["spec"]
+    print("Trainee prepare")
+    print(f"- Project: {project_root}")
+    print(f"- Baseline config: {config.launch.baseline_config or 'not set'}")
+    print(f"- Replace tuning: {'true' if result['replace'] else 'false'}")
+
+    print("")
+    print("Files")
+    for path in result["files_written"]:
+        print(f"- Wrote: {Path(path).relative_to(project_root)}")
+    for path in result["files_unchanged"]:
+        print(f"- Kept: {Path(path).relative_to(project_root)}")
+    print(f"- Config: {Path(result['config_path']).relative_to(project_root)}")
+    print(f"- Tuning: {Path(result['tuning_config_path']).relative_to(project_root)}")
+
+    print("")
+    print("Output config")
+    output_discovery: OutputDiscoveryResult = result["output_discovery"]
+    if not config.launch.baseline_config:
+        print("- Status: skipped (launch.baseline_config is not set)")
+    elif config.output is not None and not config.output.config_path:
+        print("- Status: skipped (output.config_path is not set)")
+    elif config.output is not None and not result["output_applied"]:
+        print(f"- Status: configured ({config.output.config_path} -> {config.output.path})")
+    elif result["output_applied"] and output_discovery.output is not None:
+        detected = output_discovery.candidates[0] if output_discovery.candidates else None
+        if detected is not None:
+            print(f"- Detected: {detected.config_path} = {detected.current_value}")
+        print(f"- Applied: project.yaml output.config_path = {output_discovery.output.config_path}")
+        print(f"- Runtime path: {output_discovery.output.path}")
+    else:
+        print("- Status: skipped (no single confident output path detected)")
+    for candidate in output_discovery.candidates[:5]:
+        print(f"- Candidate: {candidate.config_path}={candidate.current_value} ({candidate.reason})")
+    for warning in output_discovery.warnings:
+        print(f"- Warning: {warning}")
+
+    print("")
     print("Tunable discovery")
     tunable_discovery = result["tunable_discovery"]
     if tunable_discovery is None:
         if not config.launch.baseline_config:
             reason = "launch.baseline_config is not set"
-        elif config.tuning.params:
+        elif config.tuning.params and not result["replace"]:
             reason = "tuning.yaml already has params"
         else:
-            reason = "kept existing project.yaml"
+            reason = "not needed"
         print(f"- Status: skipped ({reason})")
     else:
         source = tunable_discovery.source
@@ -792,10 +924,15 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
             print(f"- Warning: {warning}")
 
     print("")
+    print("Effective configuration")
+    print(f"- Output: {spec.output.config_path + ' -> ' + spec.output.path if spec.output else 'not set'}")
+    print(f"- Tunable parameters: {_format_tunable_params(spec.tunable_params)}")
+
+    print("")
     print("Next")
     print("- Review: .trainee/project.yaml, .trainee/tuning.yaml, and .trainee/context.md")
     print("- Validate: trainee doctor or trainee run --dry-run")
-    print("- Next: adjust generated parameters if needed, run `trainee doctor`, then run `trainee run`")
+    print("- Next: run `trainee doctor`, then run `trainee run`")
     for warning in result["warnings"]:
         print(f"- Warning: {warning}")
 
@@ -875,10 +1012,12 @@ def _print_run_result(result: Mapping[str, Any]) -> None:
 def _print_tunable_discovery_result(result: Mapping[str, Any]) -> None:
     discovery = result["result"]
     suggestions = [item.model_dump(mode="json", exclude_none=True) for item in discovery.suggestions]
+    candidates = [item.model_dump(mode="json", exclude_none=True) for item in discovery.candidates]
     print("Trainee tunable discovery")
     print(f"- Project: {result['project_root']}")
     print(f"- Baseline config: {discovery.baseline_config_path or 'not set'}")
     print(f"- Source: {discovery.source}" + (f" ({discovery.provider}:{discovery.model})" if discovery.source == "llm" else ""))
+    print(f"- Candidates: {len(candidates)}")
     print(f"- Suggestions: {len(suggestions)}")
     for warning in discovery.warnings:
         print(f"- Warning: {warning}")
@@ -888,6 +1027,14 @@ def _print_tunable_discovery_result(result: Mapping[str, Any]) -> None:
             print(f"- Skipped: {item.name} ({item.target}) - {item.reason}")
     print("")
     print(yaml.safe_dump(suggestions, sort_keys=False, allow_unicode=True), end="")
+
+
+def _write_if_changed(path: Path, content: str) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.write_text(content, encoding="utf-8")
+    return True
 
 
 def _launch_read_targets(project_root: Path) -> list[Path]:
@@ -956,7 +1103,7 @@ def _render_launch_readme(project_root: Path, discovery: Any) -> str:
             "",
             "1. Edit `project.yaml`: select `launch.baseline_config` and confirm data, environment, command, fixed limits, and metrics.",
             "2. Review `context.md` for the generated project understanding.",
-            "3. Re-run `trainee init` to fill an empty `tuning.yaml`, then review it.",
+            "3. Set `output.config_path`, run `trainee prepare` to fill an empty `tuning.yaml`, then review both files.",
             "4. Run `trainee doctor` or `trainee run --dry-run` and inspect the baseline command.",
             "5. Run `trainee run`.",
             "",

@@ -10,7 +10,6 @@ from trainee.settings import load_settings
 REGISTER_PAYLOAD_TEMPLATE = {
     "security_mode": "unsafe",
     "heartbeat_interval_sec": 0.1,
-    "stall_timeout_sec": 1.5,
     "max_rounds": 2,
     "wandb_enabled": True,
     "tunable_params": [
@@ -35,8 +34,6 @@ def _project_form(payload: dict[str, object]) -> dict[str, object]:
     shell_command = str(payload["launcher_template"]).replace("{extra_args}", "").strip()
     advanced = {
         "heartbeat_interval_sec": payload.get("heartbeat_interval_sec", 5.0),
-        "stall_timeout_sec": payload.get("stall_timeout_sec", 120.0),
-        "kill_on_stall": payload.get("kill_on_stall", True),
         "signal_sources": payload.get("signal_sources", []),
         "log_paths": payload.get("log_paths", []),
         "shell_command": shell_command,
@@ -87,8 +84,6 @@ def _registration(payload: dict[str, object]) -> dict[str, object]:
             "security_mode": payload.get("security_mode", "guarded"),
             "working_dir": payload.get("working_dir"),
             "heartbeat_interval_sec": payload.get("heartbeat_interval_sec", 5.0),
-            "stall_timeout_sec": payload.get("stall_timeout_sec", 120.0),
-            "kill_on_stall": payload.get("kill_on_stall", True),
             "signal_sources": payload.get("signal_sources", []),
             "log_paths": payload.get("log_paths", []),
             "wandb_enabled": payload.get("wandb_enabled", False),

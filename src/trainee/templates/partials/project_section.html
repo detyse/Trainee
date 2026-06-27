@@ -20,7 +20,9 @@
       <input type="hidden" name="tunable_reviewed" value="1" />
       <div class="notice">
         Suggested {{ tunable_discovery.suggestions | length }} tunable parameter{{ "" if tunable_discovery.suggestions | length == 1 else "s" }}
-        from {{ tunable_discovery.source }} discovery. Review the YAML below, then save tuning.yaml to approve.
+        from {{ tunable_discovery.source }} discovery
+        {% if tunable_discovery.candidates %}out of {{ tunable_discovery.candidates | length }} review candidate{{ "" if tunable_discovery.candidates | length == 1 else "s" }}{% endif %}.
+        Review the YAML below, then save tuning.yaml to approve.
         {% for warning in tunable_discovery.warnings %}
           <br /><span class="muted">{{ warning }}</span>
         {% endfor %}
@@ -77,6 +79,15 @@
           name="baseline_config"
           value="{{ cfg.launch.baseline_config or '' if cfg else '' }}"
           placeholder="configs/base.yaml"
+        />
+      </label>
+      <label>
+        <span>Output config path</span>
+        <input
+          type="text"
+          name="output_config_path"
+          value="{{ cfg.output.config_path or '' if cfg and cfg.output else '' }}"
+          placeholder="output.root"
         />
       </label>
       <label>
@@ -152,10 +163,8 @@
       </div>
       <label>
         <span>Additional advanced YAML</span>
-        <textarea name="advanced_yaml" rows="8" placeholder="heartbeat_interval_sec: 5&#10;stall_timeout_sec: 120&#10;shell_command: null">{% if cfg %}{{ {
+        <textarea name="advanced_yaml" rows="8" placeholder="heartbeat_interval_sec: 5&#10;shell_command: null">{% if cfg %}{{ {
           "heartbeat_interval_sec": cfg.advanced.heartbeat_interval_sec,
-          "stall_timeout_sec": cfg.advanced.stall_timeout_sec,
-          "kill_on_stall": cfg.advanced.kill_on_stall,
           "signal_sources": cfg.advanced.signal_sources,
           "log_paths": cfg.advanced.log_paths,
           "shell_command": cfg.advanced.shell_command

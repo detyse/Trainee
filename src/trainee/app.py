@@ -19,7 +19,7 @@ from starlette.datastructures import FormData
 
 from trainee.events import EventBus
 from trainee.logging import configure_logging, get_logger
-from trainee.models import ProjectContext, PromptPreset
+from trainee.models import OutputConfig, ProjectContext, PromptPreset
 from trainee.orchestrator import RuntimeService
 from trainee.project_config import (
     AdvancedConfig,
@@ -882,6 +882,7 @@ def _project_config_from_form(form: FormData) -> tuple[Path, ProjectConfig]:
             timeout_minutes=float(timeout_raw) if timeout_raw else None,
             fixed_args=_parse_arg_lines(_form_str(form, "fixed_args_lines")),
         ),
+        output=OutputConfig(config_path=_form_str(form, "output_config_path") or None),
         tuning=TuningConfig(params=_parse_yaml_list(_form_str(form, "tunable_params_yaml"), "tunable_params_yaml")),
         metrics=MetricsConfig(
             specs=_parse_yaml_list(_form_str(form, "metric_specs_yaml"), "metric_specs_yaml"),

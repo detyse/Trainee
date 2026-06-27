@@ -427,9 +427,6 @@ class RuntimeService:
                 elif result.terminated_reason == "timeout":
                     round_record.status = "timeout"
                     round_record.error = "Training process exceeded round_timeout_sec and was terminated."
-                elif result.stalled:
-                    round_record.status = "stalled"
-                    round_record.error = "Heartbeat timed out before training produced a fresh signal."
                 elif (result.exit_code or 0) != 0:
                     round_record.status = "failed"
                     round_record.error = f"Training process exited with code {result.exit_code}."
@@ -519,9 +516,6 @@ class RuntimeService:
         snapshot.current_round_index = round_index
         snapshot.last_heartbeat_at = utc_now()
         snapshot.last_signal_at = payload.get("last_signal_at") or snapshot.last_signal_at
-        if payload.get("stalled"):
-            snapshot.status = "waiting_signal"
-            snapshot.message = "Heartbeat detected a stall candidate; waiting for process completion."
         self.storage.save_loop_snapshot(snapshot)
         await self._publish("heartbeat", payload)
 

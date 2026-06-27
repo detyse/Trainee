@@ -12,7 +12,6 @@ from trainee.models import ProjectSpec
 REGISTER_PAYLOAD_TEMPLATE = {
     "security_mode": "unsafe",
     "heartbeat_interval_sec": 0.1,
-    "stall_timeout_sec": 1.5,
     "max_rounds": 2,
     "wandb_enabled": True,
     "tunable_params": [
@@ -59,8 +58,6 @@ def _registration(payload):
             "security_mode": payload.get("security_mode", "guarded"),
             "working_dir": payload.get("working_dir"),
             "heartbeat_interval_sec": payload.get("heartbeat_interval_sec", 5.0),
-            "stall_timeout_sec": payload.get("stall_timeout_sec", 120.0),
-            "kill_on_stall": payload.get("kill_on_stall", True),
             "signal_sources": payload.get("signal_sources", []),
             "log_paths": payload.get("log_paths", []),
             "wandb_enabled": payload.get("wandb_enabled", False),
@@ -316,7 +313,6 @@ print(f"max_frames={max_frames} theta={theta} total_loss={float(max_frames):.1f}
             "security_mode": "unsafe",
             "working_dir": ".",
             "heartbeat_interval_sec": 0.1,
-            "stall_timeout_sec": 1.5,
             "signal_sources": [{"type": "stdout"}],
             "log_paths": [".trainee/runs/**/*.log"],
             "wandb_enabled": False,
@@ -389,7 +385,6 @@ for step, loss in enumerate([0.9, 0.4]):
             }
         ],
         "heartbeat_interval_sec": 0.05,
-        "stall_timeout_sec": 0.2,
         "max_rounds": 1,
     }
 
@@ -444,7 +439,7 @@ def _skip_without_working_bwrap() -> None:
         pytest.skip(f"bubblewrap unavailable in this environment: {result.stderr.strip()}")
 
 
-def test_stalled_round_marks_failed_session(runtime_env, wait_for):
+def test_silent_round_is_not_failed_before_round_timeout(runtime_env, wait_for):
     client = runtime_env["client"]
     external_project = runtime_env["external_project"]
     python = runtime_env["python"]
@@ -456,16 +451,16 @@ def test_stalled_round_marks_failed_session(runtime_env, wait_for):
         "data_paths": [str(external_project / "data")],
         "log_paths": [str(external_project / "logs" / "*.log")],
         "heartbeat_interval_sec": 0.1,
-        "stall_timeout_sec": 0.3,
+        "round_timeout_sec": 3.0,
         "max_rounds": 1,
     }
 
     assert client.post("/api/project/register", json=_registration(register_payload)).status_code == 200
     assert client.post("/api/loop/start").status_code == 200
 
-    wait_for(lambda: client.get("/api/loop").json()["status"] == "failed")
+    wait_for(lambda: client.get("/api/loop").json()["status"] == "stopped")
     runs_payload = client.get("/api/runs").json()
-    assert runs_payload["rounds"][0]["status"] == "stalled"
+    assert runs_payload["rounds"][0]["status"] == "completed"
 
 
 def test_round_timeout_terminates_process_and_marks_failed_session(runtime_env, wait_for):
@@ -480,7 +475,6 @@ def test_round_timeout_terminates_process_and_marks_failed_session(runtime_env, 
         "data_paths": [str(external_project / "data")],
         "log_paths": [str(external_project / "logs" / "*.log")],
         "heartbeat_interval_sec": 0.1,
-        "stall_timeout_sec": 5.0,
         "round_timeout_sec": 0.3,
         "max_rounds": 1,
     }
@@ -506,7 +500,6 @@ def test_force_stop_terminates_active_round_and_marks_session_stopped(runtime_en
         "data_paths": [str(external_project / "data")],
         "log_paths": [str(external_project / "logs" / "*.log")],
         "heartbeat_interval_sec": 0.1,
-        "stall_timeout_sec": 5.0,
         "max_rounds": 1,
     }
 

@@ -102,6 +102,31 @@ class TunableParam(BaseModel):
         return f"name:{self.name}"
 
 
+class OutputConfig(BaseModel):
+    config_path: Optional[str] = None
+    path: str = "{round_dir}/outputs"
+
+    @field_validator("config_path")
+    @classmethod
+    def validate_config_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(not part for part in normalized.split(".")):
+            raise ValueError("config_path must use non-empty dot-separated segments")
+        return normalized
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("path cannot be blank")
+        return normalized
+
+
 class MetricSpec(BaseModel):
     name: str
     source: MetricSource = "log_regex"
@@ -156,12 +181,11 @@ class ProjectSpec(BaseModel):
     signal_sources: List[SignalSource] = Field(default_factory=list)
     wandb_enabled: bool = False
     heartbeat_interval_sec: float = 5.0
-    stall_timeout_sec: float = 120.0
-    kill_on_stall: bool = True
     round_timeout_sec: Optional[float] = None
     max_rounds: int = 3
     tunable_params: List[TunableParam] = Field(default_factory=list)
     baseline_config_path: Optional[str] = None
+    output: Optional[OutputConfig] = None
     metric_specs: List[MetricSpec] = Field(default_factory=list)
     metric_prompt: str = ""
     tuning_prompt: str = ""
@@ -170,8 +194,6 @@ class ProjectSpec(BaseModel):
     def validate_project(self) -> "ProjectSpec":
         if self.heartbeat_interval_sec <= 0:
             raise ValueError("heartbeat_interval_sec must be positive")
-        if self.stall_timeout_sec <= 0:
-            raise ValueError("stall_timeout_sec must be positive")
         if self.round_timeout_sec is not None and self.round_timeout_sec <= 0:
             raise ValueError("round_timeout_sec must be positive when set")
         if self.max_rounds <= 0:

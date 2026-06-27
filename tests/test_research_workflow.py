@@ -115,7 +115,6 @@ def test_runtime_decision_receives_research_state(runtime_env, wait_for) -> None
         "launcher_template": f"{python} {{project_root}}/train.py --log-file {{project_root}}/logs/state.log {{extra_args}}",
         "security_mode": "unsafe",
         "heartbeat_interval_sec": 0.1,
-        "stall_timeout_sec": 1.5,
         "max_rounds": 2,
         "tunable_params": [
             {"name": "lr", "flag": "--lr", "type": "float", "default": 0.2, "min_value": 0.05, "max_value": 0.4},
@@ -150,7 +149,6 @@ def test_runtime_decision_receives_research_state(runtime_env, wait_for) -> None
             "security_mode": "unsafe",
             "working_dir": payload["working_dir"],
             "heartbeat_interval_sec": 0.1,
-            "stall_timeout_sec": 1.5,
             "signal_sources": [],
             "log_paths": [],
             "shell_command": str(payload["launcher_template"]).replace("{extra_args}", "").strip(),
@@ -235,7 +233,6 @@ def test_final_round_records_decision_and_rejected_signature(runtime_env, wait_f
             "security_mode": "unsafe",
             "working_dir": str(external_project),
             "heartbeat_interval_sec": 0.1,
-            "stall_timeout_sec": 1.5,
             "signal_sources": [],
             "log_paths": [],
             "shell_command": (

@@ -94,7 +94,7 @@ class ContextBuilder:
             result_lines.append("Legacy log paths: " + ", ".join(spec.log_paths))
         if spec.signal_sources:
             result_lines.append(
-                "Signal sources: "
+                "Activity monitor sources: "
                 + " | ".join(f"{item.type}: {', '.join(item.configured_paths()) or 'process output'}" for item in spec.signal_sources)
             )
         if spec.metric_log_paths():

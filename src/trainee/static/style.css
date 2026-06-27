@@ -297,7 +297,6 @@ button:disabled {
 }
 
 .status-failed,
-.status-stalled,
 .status-provider-failed,
 .status-request-failed,
 .status-response-failed,

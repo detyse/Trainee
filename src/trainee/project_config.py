@@ -12,7 +12,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from trainee.config_paths import get_config_value
-from trainee.models import MetricSpec, ProjectSpec, SecurityMode, SignalSource, TunableParam
+from trainee.models import MetricSpec, OutputConfig, ProjectSpec, SecurityMode, SignalSource, TunableParam
 
 
 LaunchEnvironment = Literal["system", "uv", "venv", "conda"]
@@ -94,8 +94,6 @@ class AdvancedConfig(BaseModel):
     security_mode: SecurityMode = "guarded"
     working_dir: Optional[str] = None
     heartbeat_interval_sec: float = 5.0
-    stall_timeout_sec: float = 120.0
-    kill_on_stall: bool = True
     signal_sources: list[SignalSource] = Field(
         default_factory=lambda: [
             SignalSource(type="stdout"),
@@ -114,6 +112,7 @@ class ProjectConfig(BaseModel):
     launch: LaunchConfig
     run: RunConfig = Field(default_factory=RunConfig)
     tuning: TuningConfig = Field(default_factory=TuningConfig)
+    output: Optional[OutputConfig] = None
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
 
@@ -127,11 +126,33 @@ class ProjectConfig(BaseModel):
         ]
         if conflicts:
             raise ValueError("tuning.yaml params must not include fixed launch/run args: " + ", ".join(conflicts))
+        if self.output is not None and self.output.config_path:
+            output_conflicts = [
+                item.name
+                for item in self.tuning.params
+                if item.config_path == self.output.config_path
+            ]
+            if output_conflicts:
+                raise ValueError(
+                    "output.config_path must not also be listed in tuning.yaml params: "
+                    + ", ".join(output_conflicts)
+                )
         return self
 
 
 class ProjectRegistration(ProjectConfig):
     project_root: str
+
+
+class _ProjectConfigYamlDumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_empty_null(dumper: yaml.Dumper, data: None) -> yaml.nodes.ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:null", "")
+
+
+_ProjectConfigYamlDumper.add_representer(type(None), _represent_empty_null)
 
 
 def fixed_arg_exclusions(fixed_args: Iterable[CommandArg]) -> set[str]:
@@ -253,18 +274,31 @@ def restore_tuning_config(project_root: str | Path, previous: Optional[bytes]) -
 def render_project_config_yaml(config: ProjectConfig) -> str:
     payload = config.model_dump(mode="json", exclude_none=True)
     payload.pop("tuning", None)
+    payload.pop("output", None)
     launch = config.launch.model_dump(mode="json", exclude_none=True)
     launch_payload: dict[str, Any] = {
         "environment": launch["environment"],
+        "env_name": config.launch.env_name,
     }
-    if "env_name" in launch:
-        launch_payload["env_name"] = launch["env_name"]
     launch_payload["command"] = launch["command"]
     launch_payload["baseline_config"] = config.launch.baseline_config
     launch_payload["args"] = launch["args"]
     payload["launch"] = launch_payload
-    return yaml.safe_dump(
-        payload,
+    output_payload = {"config_path": config.output.config_path if config.output else None}
+    ordered_payload: dict[str, Any] = {}
+    for key in ("version", "data", "launch", "run"):
+        if key in payload:
+            ordered_payload[key] = payload[key]
+    ordered_payload["output"] = output_payload
+    for key in ("metrics", "advanced"):
+        if key in payload:
+            ordered_payload[key] = payload[key]
+    for key, value in payload.items():
+        if key not in ordered_payload:
+            ordered_payload[key] = value
+    return yaml.dump(
+        ordered_payload,
+        Dumper=_ProjectConfigYamlDumper,
         sort_keys=False,
         allow_unicode=True,
         default_flow_style=False,
@@ -307,6 +341,7 @@ def compile_project_spec(
     working_dir = _resolve_project_path(root, config.advanced.working_dir or ".")
     launcher = _render_launcher(root, config)
     baseline_config_path = str(_resolve_project_path(root, config.launch.baseline_config)) if config.launch.baseline_config else None
+    output = _resolve_output_config(config.output, baseline_config_path, config.tuning.params)
     tunable_params = _resolve_config_tunable_defaults(config.tuning.params, baseline_config_path)
     return ProjectSpec(
         project_root=str(root),
@@ -318,12 +353,11 @@ def compile_project_spec(
         signal_sources=config.advanced.signal_sources,
         wandb_enabled=config.advanced.wandb_enabled,
         heartbeat_interval_sec=config.advanced.heartbeat_interval_sec,
-        stall_timeout_sec=config.advanced.stall_timeout_sec,
-        kill_on_stall=config.advanced.kill_on_stall,
         round_timeout_sec=config.run.timeout_minutes * 60 if config.run.timeout_minutes is not None else None,
         max_rounds=config.run.max_rounds,
         tunable_params=tunable_params,
         baseline_config_path=baseline_config_path,
+        output=output,
         metric_specs=config.metrics.specs,
         metric_prompt=config.metrics.prompt,
         tuning_prompt=config.advanced.tuning_prompt,
@@ -379,6 +413,7 @@ def default_project_config(
             command=command,
             baseline_config=normalized_baseline,
         ),
+        output=OutputConfig(),
         run=RunConfig(fixed_args=discovery.limit_flags),
     )
 
@@ -453,6 +488,29 @@ def _resolve_config_tunable_defaults(
         payload["default"] = default
         resolved.append(TunableParam.model_validate(payload))
     return resolved
+
+
+def _resolve_output_config(
+    output: Optional[OutputConfig],
+    baseline_config_path: Optional[str],
+    params: list[TunableParam],
+) -> Optional[OutputConfig]:
+    if output is None or not output.config_path:
+        return None
+    if baseline_config_path is None:
+        raise ValueError("output.config_path requires launch.baseline_config")
+    conflicts = [item.name for item in params if item.config_path == output.config_path]
+    if conflicts:
+        raise ValueError(
+            "output.config_path must not also be listed in tuning.yaml params: "
+            + ", ".join(conflicts)
+        )
+    baseline = _load_yaml_mapping(Path(baseline_config_path))
+    try:
+        get_config_value(baseline, output.config_path)
+    except ValueError as exc:
+        raise ValueError(f"output.config_path is not in launch.baseline_config: {output.config_path}") from exc
+    return output
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:

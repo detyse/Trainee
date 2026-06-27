@@ -326,6 +326,16 @@ def _check_launcher(project_root: Path, spec: ProjectSpec | None) -> DoctorSecti
                 section.add("warn", f"{target.name} may write outside .trainee: {target.value}")
         else:
             section.add("ok", "output_dir points to .trainee/runs")
+    elif spec.output is not None:
+        executor = TrainingExecutor()
+        workspace = executor.round_workspace(spec, session_id=0, round_index=0)
+        try:
+            rendered_output = executor.render_output_path(spec, workspace)
+            executor._validate_output_path(spec, rendered_output)
+        except ValueError as exc:
+            section.add("fail", f"config output path is invalid: {exc}", fix="edit output in .trainee/project.yaml")
+        else:
+            section.add("ok", f"config output path: {spec.output.config_path} -> {rendered_output}")
     else:
         section.add("warn", "launcher has no output_dir")
         for target in output_targets:

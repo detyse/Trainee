@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 import trainee.cli as cli
-from trainee.cli import build_tool_manifest, call_tool, init_project, load_tool_input, main
+from trainee.cli import build_tool_manifest, call_tool, init_project, load_tool_input, main, prepare_project
 
 
 def test_tool_manifest_exposes_tool_call_safe_names():
@@ -63,8 +63,11 @@ def test_init_project_initializes_project_files(tmp_path):
     tuning_yaml = yaml.safe_load((trainee_dir / "tuning.yaml").read_text(encoding="utf-8"))
     context_md = (trainee_dir / "context.md").read_text(encoding="utf-8")
     assert project_yaml["launch"]["command"] == ["python", "train.py"]
+    assert "env_name" in project_yaml["launch"]
+    assert project_yaml["launch"]["env_name"] is None
     assert project_yaml["launch"]["baseline_config"] is None
     assert project_yaml["launch"]["args"] == []
+    assert project_yaml["output"] == {"config_path": None}
     assert "tuning" not in project_yaml
     assert tuning_yaml["params"] == []
     assert project_yaml["advanced"]["security_mode"] == "guarded"
@@ -149,18 +152,17 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     assert "- Fixed arguments: none" in output
     assert "- Tunable parameters: none" in output
     assert "- Metrics: none (built-in loss/total_loss parsing only)" in output
-    assert "- Runtime: kill_on_stall=true, wandb=disabled" in output
+    assert "- Runtime: round_timeout=60 minutes, wandb=disabled" in output
     assert (
-        "- Heartbeat: every 5s, stall after 120s; "
+        "- Activity monitor: every 5s, "
         "sources=stdout; log_file_mtime(.trainee/logs/**/*.log, .trainee/runs/**/*.log)"
     ) in output
     assert "- Log paths: .trainee/logs/**/*.log, .trainee/runs/**/*.log" in output
     assert "- Launcher: python train.py {extra_args}" in output
-    assert "Tunable discovery" in output
-    assert "- Status: skipped (launch.baseline_config is not set)" in output
     assert "- Review: .trainee/project.yaml, .trainee/tuning.yaml, and .trainee/context.md" in output
+    assert "- Prepare: set launch.baseline_config, then run `trainee prepare`" in output
     assert "- Validate: trainee doctor or trainee run --dry-run" in output
-    assert "- Next: adjust generated parameters if needed, run `trainee doctor`, then run `trainee run`" in output
+    assert "- Next: run `trainee prepare`, review generated config, then run `trainee doctor`" in output
     assert "uvicorn" not in output.lower()
 
 
@@ -186,16 +188,13 @@ def test_init_command_sets_explicit_baseline_config(tmp_path, capsys, monkeypatc
     tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
     assert payload["launch"]["baseline_config"] == "configs/base.yaml"
     assert "tuning" not in payload
-    assert tuning_payload["params"][0]["config_path"] == "lr"
-    assert "default" not in tuning_payload["params"][0]
+    assert tuning_payload["params"] == []
     output = capsys.readouterr().out
     assert "- Baseline config: configs/base.yaml" in output
     assert "- Launcher: python train.py --config {config_path} {extra_args}" in output
-    assert "- Source: heuristic" in output
-    assert "- Generated: 1 parameter(s) in tuning.yaml params" in output
 
 
-def test_init_supplements_empty_tuning_after_project_yaml_baseline_is_set(tmp_path, capsys, monkeypatch):
+def test_prepare_supplements_empty_tuning_after_project_yaml_baseline_is_set(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
     project = tmp_path / "toymodel"
@@ -211,16 +210,48 @@ def test_init_supplements_empty_tuning_after_project_yaml_baseline_is_set(tmp_pa
     edited_project_yaml = project_yaml_path.read_text(encoding="utf-8")
     capsys.readouterr()
 
-    assert main(["init", str(project)]) == 0
+    assert main(["prepare", str(project)]) == 0
 
     output = capsys.readouterr().out
     tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
     assert project_yaml_path.read_text(encoding="utf-8") == edited_project_yaml
     assert tuning_payload["params"][0]["config_path"] == "lr"
-    assert "- Status: updated tuning.yaml from existing project config" in output
-    assert "- Kept: .trainee/project.yaml" in output
+    assert "Trainee prepare" in output
     assert "- Wrote: .trainee/tuning.yaml" in output
     assert "- Generated: 1 parameter(s) in tuning.yaml params" in output
+
+
+def test_prepare_uses_configured_output_root(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
+    project = tmp_path / "toymodel"
+    (project / "configs").mkdir(parents=True)
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (project / "configs" / "base.yaml").write_text(
+        """
+lr: 0.001
+output:
+  root: outputs
+  run_name: baseline
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    assert main(["init", str(project), "--baseline-config", "configs/base.yaml"]) == 0
+    project_yaml_path = project / ".trainee" / "project.yaml"
+    project_yaml = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
+    project_yaml["output"]["config_path"] = "output.root"
+    project_yaml_path.write_text(yaml.safe_dump(project_yaml, sort_keys=False), encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["prepare", str(project)]) == 0
+
+    output = capsys.readouterr().out
+    project_yaml = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
+    tuning_yaml = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
+    assert project_yaml["output"] == {"config_path": "output.root"}
+    assert tuning_yaml["params"][0]["config_path"] == "lr"
+    assert "- Status: configured (output.root -> {round_dir}/outputs)" in output
 
 
 def test_tunables_discover_applies_to_tuning_yaml(tmp_path, capsys, monkeypatch):
@@ -243,7 +274,7 @@ def test_tunables_discover_applies_to_tuning_yaml(tmp_path, capsys, monkeypatch)
     assert tuning_payload["params"][0]["config_path"] == "lr"
 
 
-def test_init_excludes_fixed_args_from_generated_tunables(tmp_path, monkeypatch):
+def test_prepare_excludes_fixed_args_from_generated_tunables(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
     project = tmp_path / "toymodel"
@@ -264,7 +295,8 @@ fit:
         encoding="utf-8",
     )
 
-    result = init_project(project, baseline_config="configs/base.yaml")
+    init_project(project, baseline_config="configs/base.yaml")
+    result = prepare_project(project)
 
     paths = {item.config_path for item in result["config"].tuning.params}
     assert "fit.term_weights.theta" in paths
@@ -338,7 +370,7 @@ def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.1.2\nLast updated: 2026-06-26 20:39:40 +08:00\n"
+    assert capsys.readouterr().out == "Trainee 0.2.1\nLast updated: 2026-06-27 21:52:54 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys):

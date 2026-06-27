@@ -18,8 +18,14 @@ from trainee.project_config import (
     fixed_arg_exclusions,
     tunable_excluded_by_fixed_args,
 )
+from trainee.prompt_documents import PromptDocument, PromptDocumentLoader
 from trainee.providers import active_model, provider_is_configured
 from trainee.settings import Settings
+
+
+CandidateApplicability = Literal["auto_applyable", "needs_review", "unsupported"]
+CandidateRisk = Literal["low", "medium", "high", "unknown"]
+CandidateTargetKind = Literal["config_path", "cli_flag", "note"]
 
 
 class TunableParamSuggestion(BaseModel):
@@ -52,6 +58,22 @@ class TunableParamSuggestion(BaseModel):
         )
 
 
+class TunableCandidate(BaseModel):
+    name: str
+    target_kind: CandidateTargetKind = "config_path"
+    target: str
+    type: ParamType = "float"
+    default: Any = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    choices: Optional[list[str]] = None
+    applicability: CandidateApplicability = "needs_review"
+    risk: CandidateRisk = "unknown"
+    reason: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class TunableDiscoveryRequest(BaseModel):
     project_root: Optional[str] = None
     limit: int = Field(default=32, ge=1, le=32)
@@ -68,6 +90,7 @@ class TunableDiscoveryResult(BaseModel):
     provider: str = "none"
     model: str = "none"
     baseline_config_path: Optional[str] = None
+    candidates: list[TunableCandidate] = Field(default_factory=list)
     suggestions: list[TunableParamSuggestion] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -82,6 +105,7 @@ class TunableDiscoveryEngine:
     def __init__(self, settings: Settings, decision_engine: Optional[DecisionEngine] = None) -> None:
         self.settings = settings
         self.decision_engine = decision_engine or DecisionEngine(settings)
+        self.prompt_document_loader = PromptDocumentLoader()
 
     async def suggest(
         self,
@@ -92,7 +116,14 @@ class TunableDiscoveryEngine:
         fixed_args: Iterable[CommandArg] = (),
     ) -> TunableDiscoveryResult:
         exclusions = fixed_arg_exclusions(fixed_args)
-        heuristic = suggest_tunable_params_heuristic(spec, context, limit=limit, exclusions=exclusions)
+        prompt_documents = self.prompt_document_loader.load(spec.project_root)
+        heuristic = suggest_tunable_params_heuristic(
+            spec,
+            context,
+            limit=limit,
+            exclusions=exclusions,
+            prompt_documents=prompt_documents,
+        )
         if not provider_is_configured(self.settings):
             return heuristic
 
@@ -101,10 +132,11 @@ class TunableDiscoveryEngine:
             leaves = _flatten_scalars(baseline)
             completion = await self.decision_engine._provider_complete(  # noqa: SLF001 - internal provider adapter reuse
                 _discovery_system_prompt(),
-                _discovery_user_prompt(spec, context, heuristic, leaves, limit),
+                _discovery_user_prompt(spec, context, heuristic, leaves, limit, prompt_documents),
             )
             payload = _extract_json_object(completion.content)
-            suggestions = _suggestions_from_payload(payload, leaves, spec, limit, exclusions)
+            candidates = _candidates_from_payload(payload, leaves, spec, limit)
+            suggestions = _suggestions_from_candidates(candidates, leaves, spec, limit, exclusions)
         except Exception as exc:
             return heuristic.model_copy(
                 update={
@@ -116,8 +148,18 @@ class TunableDiscoveryEngine:
             )
 
         if not suggestions:
+            if candidates:
+                return TunableDiscoveryResult(
+                    source="llm",
+                    provider=self.settings.llm_provider,
+                    model=active_model(self.settings),
+                    baseline_config_path=spec.baseline_config_path,
+                    candidates=candidates,
+                    suggestions=[],
+                    warnings=[*heuristic.warnings, "LLM returned candidates, but none were auto-applyable."],
+                )
             return heuristic.model_copy(
-                update={"warnings": [*heuristic.warnings, "LLM did not return any valid tunable suggestions."]}
+                update={"warnings": [*heuristic.warnings, "LLM did not return any valid tunable candidates."]}
             )
 
         return TunableDiscoveryResult(
@@ -125,6 +167,7 @@ class TunableDiscoveryEngine:
             provider=self.settings.llm_provider,
             model=active_model(self.settings),
             baseline_config_path=spec.baseline_config_path,
+            candidates=candidates,
             suggestions=suggestions,
             warnings=heuristic.warnings,
         )
@@ -136,6 +179,7 @@ def suggest_tunable_params_heuristic(
     *,
     limit: int = 32,
     exclusions: Optional[set[str]] = None,
+    prompt_documents: Iterable[PromptDocument] = (),
 ) -> TunableDiscoveryResult:
     warnings: list[str] = []
     exclusions = exclusions or set()
@@ -157,7 +201,7 @@ def suggest_tunable_params_heuristic(
 
     leaves = _flatten_scalars(baseline)
     existing_targets = _existing_targets(spec)
-    context_text = _context_text(spec, context)
+    context_text = _context_text(spec, context, prompt_documents)
     scored: list[tuple[float, TunableParamSuggestion]] = []
     for path, value in leaves.items():
         if path in existing_targets:
@@ -177,6 +221,7 @@ def suggest_tunable_params_heuristic(
         provider="none",
         model="none",
         baseline_config_path=spec.baseline_config_path,
+        candidates=_candidates_from_suggestions([item[1] for item in scored[:limit]]),
         suggestions=[item[1] for item in scored[:limit]],
         warnings=warnings,
     )
@@ -273,7 +318,7 @@ def _flatten_scalars(payload: Any, prefix: str = "") -> dict[str, Any]:
 
 
 def _existing_targets(spec: ProjectSpec) -> set[str]:
-    return {
+    targets = {
         item.config_path
         for item in spec.tunable_params
         if item.config_path
@@ -282,6 +327,9 @@ def _existing_targets(spec: ProjectSpec) -> set[str]:
         for item in spec.tunable_params
         if item.flag
     }
+    if spec.output is not None:
+        targets.add(spec.output.config_path)
+    return targets
 
 
 def _heuristic_suggestion(path: str, value: Any, context_text: str) -> Optional[TunableParamSuggestion]:
@@ -373,7 +421,11 @@ def _reason_for(path: str) -> str:
     return "Numeric config field with tuning-related naming/context."
 
 
-def _context_text(spec: ProjectSpec, context: ProjectContext) -> str:
+def _context_text(
+    spec: ProjectSpec,
+    context: ProjectContext,
+    prompt_documents: Iterable[PromptDocument] = (),
+) -> str:
     return " ".join(
         [
             spec.tuning_prompt,
@@ -381,6 +433,7 @@ def _context_text(spec: ProjectSpec, context: ProjectContext) -> str:
             context.training_entrypoint_summary,
             context.parameter_summary,
             context.result_reading_summary,
+            *[item.text for item in prompt_documents],
         ]
     ).lower()
 
@@ -391,9 +444,10 @@ def _path_tokens(path: str) -> list[str]:
 
 def _discovery_system_prompt() -> str:
     return (
-        "You are a conservative training-configuration reviewer. "
-        "Suggest a small whitelist of tunable parameters from the provided baseline config. "
-        "Only suggest scalar config paths that exist in the candidate list. "
+        "You are a training-configuration reviewer. "
+        "Propose a broad but auditable set of candidate tunable parameters. "
+        "Mark candidates that can safely become tuning.yaml params as auto_applyable; "
+        "mark uncertain, non-numeric, CLI, or structural changes as needs_review or unsupported. "
         "Return JSON only."
     )
 
@@ -404,7 +458,13 @@ def _discovery_user_prompt(
     heuristic: TunableDiscoveryResult,
     leaves: dict[str, Any],
     limit: int,
+    prompt_documents: Iterable[PromptDocument],
 ) -> str:
+    scalar_leaves = {
+        path: value
+        for path, value in leaves.items()
+        if value is None or isinstance(value, (str, int, float, bool))
+    }
     numeric_leaves = {
         path: value
         for path, value in leaves.items()
@@ -417,18 +477,25 @@ def _discovery_user_prompt(
         "tuning_prompt": spec.tuning_prompt,
         "metric_specs": [item.model_dump(mode="json") for item in spec.metric_specs],
         "existing_tunable_params": [item.model_dump(mode="json") for item in spec.tunable_params],
+        "prompt_documents": [item.model_dump(mode="json") for item in prompt_documents],
+        "scalar_config_leaves": scalar_leaves,
         "numeric_config_leaves": numeric_leaves,
         "heuristic_suggestions": [item.model_dump(mode="json") for item in heuristic.suggestions],
         "output_schema": {
-            "suggestions": [
+            "candidates": [
                 {
                     "name": "string",
-                    "config_path": "existing dot path from numeric_config_leaves",
-                    "type": "int|float",
+                    "target_kind": "config_path|cli_flag|note",
+                    "target": "config path, CLI flag, or short note",
+                    "type": "int|float|str|bool",
                     "default": "current scalar value",
                     "min_value": "reasonable lower bound",
                     "max_value": "reasonable upper bound",
-                    "reason": "why this parameter is safe and useful to tune",
+                    "choices": ["optional string choices"],
+                    "applicability": "auto_applyable|needs_review|unsupported",
+                    "risk": "low|medium|high|unknown",
+                    "reason": "why this parameter is safe/useful or why review is needed",
+                    "evidence": ["short supporting signals from config/context"],
                     "confidence": "0..1",
                 }
             ]
@@ -437,37 +504,140 @@ def _discovery_user_prompt(
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
-def _suggestions_from_payload(
+def _candidates_from_suggestions(suggestions: Iterable[TunableParamSuggestion]) -> list[TunableCandidate]:
+    candidates: list[TunableCandidate] = []
+    for suggestion in suggestions:
+        target = suggestion.config_path or suggestion.flag or suggestion.name
+        target_kind: CandidateTargetKind = "config_path" if suggestion.config_path else "cli_flag"
+        candidates.append(
+            TunableCandidate(
+                name=suggestion.name,
+                target_kind=target_kind,
+                target=target,
+                type=suggestion.type,
+                default=suggestion.default,
+                min_value=suggestion.min_value,
+                max_value=suggestion.max_value,
+                choices=suggestion.choices,
+                applicability="auto_applyable",
+                risk="low",
+                reason=suggestion.reason,
+                evidence=["heuristic_suggestion"],
+                confidence=suggestion.confidence,
+            )
+        )
+    return candidates
+
+
+def _candidates_from_payload(
     payload: dict[str, Any],
+    leaves: dict[str, Any],
+    spec: ProjectSpec,
+    limit: int,
+) -> list[TunableCandidate]:
+    raw = payload.get("candidates", payload.get("suggestions", []))
+    if not isinstance(raw, list):
+        return []
+    existing_targets = _existing_targets(spec)
+    candidates: list[TunableCandidate] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalize_candidate_payload(item, leaves)
+        target = normalized.get("target")
+        if not isinstance(target, str) or not target or target in seen:
+            continue
+        if target in existing_targets:
+            continue
+        try:
+            candidate = TunableCandidate.model_validate(normalized)
+        except ValueError:
+            continue
+        candidates.append(candidate)
+        seen.add(target)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _normalize_candidate_payload(item: dict[str, Any], leaves: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(item)
+    if "target" not in payload:
+        if isinstance(payload.get("config_path"), str):
+            payload["target"] = payload["config_path"]
+            payload.setdefault("target_kind", "config_path")
+        elif isinstance(payload.get("flag"), str):
+            payload["target"] = payload["flag"]
+            payload.setdefault("target_kind", "cli_flag")
+    payload.setdefault("target_kind", "config_path")
+    target = payload.get("target")
+    if isinstance(target, str) and payload.get("target_kind") == "config_path" and target in leaves:
+        value = leaves[target]
+        payload.setdefault("default", value)
+        if isinstance(value, bool):
+            payload.setdefault("type", "bool")
+        elif isinstance(value, int):
+            payload.setdefault("type", "int")
+        elif isinstance(value, float):
+            payload.setdefault("type", "float")
+        elif isinstance(value, str):
+            payload.setdefault("type", "str")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            min_value, max_value = _bounds_for(value, target)
+            payload.setdefault("min_value", min_value)
+            payload.setdefault("max_value", max_value)
+    evidence = payload.get("evidence")
+    if isinstance(evidence, str):
+        payload["evidence"] = [evidence]
+    if isinstance(target, str):
+        payload.setdefault(
+            "name",
+            _param_name(target)
+            if payload.get("target_kind") == "config_path"
+            else re.sub(r"[^0-9a-zA-Z]+", "_", target.lstrip("-")).strip("_").lower(),
+        )
+    payload.setdefault("applicability", "needs_review")
+    payload.setdefault("risk", "unknown")
+    payload.setdefault("reason", "")
+    payload.setdefault("evidence", [])
+    return payload
+
+
+def _suggestions_from_candidates(
+    candidates: Iterable[TunableCandidate],
     leaves: dict[str, Any],
     spec: ProjectSpec,
     limit: int,
     exclusions: set[str],
 ) -> list[TunableParamSuggestion]:
-    raw = payload.get("suggestions", [])
-    if not isinstance(raw, list):
-        return []
     existing_targets = _existing_targets(spec)
     suggestions: list[TunableParamSuggestion] = []
     seen: set[str] = set()
-    for item in raw:
-        if not isinstance(item, dict):
+    for candidate in candidates:
+        path = candidate.target
+        if candidate.applicability != "auto_applyable" or candidate.target_kind != "config_path":
             continue
-        path = item.get("config_path")
-        if not isinstance(path, str) or path not in leaves or path in existing_targets or path in seen:
+        if path not in leaves or path in existing_targets or path in seen:
             continue
         value = leaves[path]
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             continue
-        candidate = dict(item)
-        candidate.setdefault("name", _param_name(path))
-        candidate.setdefault("type", "int" if isinstance(value, int) else "float")
-        candidate.setdefault("default", value)
+        payload = {
+            "name": candidate.name or _param_name(path),
+            "config_path": path,
+            "type": "int" if isinstance(value, int) else "float",
+            "default": value,
+            "min_value": candidate.min_value,
+            "max_value": candidate.max_value,
+            "reason": candidate.reason,
+            "confidence": candidate.confidence,
+        }
         min_value, max_value = _bounds_for(value, path)
-        candidate.setdefault("min_value", min_value)
-        candidate.setdefault("max_value", max_value)
+        payload["min_value"] = min_value if payload["min_value"] is None else payload["min_value"]
+        payload["max_value"] = max_value if payload["max_value"] is None else payload["max_value"]
         try:
-            suggestion = TunableParamSuggestion.model_validate(candidate)
+            suggestion = TunableParamSuggestion.model_validate(payload)
         except ValueError:
             continue
         if tunable_excluded_by_fixed_args(suggestion.to_tunable_param(), exclusions):

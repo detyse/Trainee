@@ -174,6 +174,52 @@ fit:
     )
 
 
+def test_output_config_rewrites_generated_round_config(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "configs").mkdir()
+    baseline = project / "configs" / "base.yaml"
+    baseline.write_text(
+        """
+data:
+  max_frames: 5
+output:
+  root: outputs
+  run_name: baseline
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = ProjectConfig(
+        launch=LaunchConfig(
+            command=["python", "-m", "src.run_fitting"],
+            baseline_config="configs/base.yaml",
+        ),
+        output={"config_path": "output.root"},
+    )
+
+    spec = compile_project_spec(project, config)
+    executor = TrainingExecutor()
+    workspace = executor.round_workspace(spec, session_id=3, round_index=2)
+    executor.write_round_config(spec, {}, workspace)
+    generated = yaml.safe_load(workspace.config_path.read_text(encoding="utf-8"))
+
+    assert generated["output"]["root"] == str(workspace.round_dir / "outputs")
+    assert generated["output"]["run_name"] == "baseline"
+    assert yaml.safe_load(baseline.read_text(encoding="utf-8"))["output"]["root"] == "outputs"
+
+
+def test_output_config_requires_baseline_config(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = ProjectConfig(
+        launch=LaunchConfig(command=["python", "train.py"]),
+        output={"config_path": "output.root"},
+    )
+
+    with pytest.raises(ValueError, match="output.config_path requires launch.baseline_config"):
+        compile_project_spec(project, config)
+
+
 def test_fixed_args_exclude_matching_tunable_flags_and_names() -> None:
     for tunable in (
         {"name": "max_iter", "flag": "--train-max-iter", "type": "int"},
@@ -331,6 +377,7 @@ def test_web_ui_saves_the_same_project_yaml(runtime_env) -> None:
         "launch_env_name": "",
         "launch_command": "python train.py",
         "baseline_config": "configs/base.yaml",
+        "output_config_path": "",
         "launch_args_lines": "--log-file=.trainee/logs/train.log",
         "max_rounds": "2",
         "timeout_minutes": "5",
@@ -374,6 +421,7 @@ def test_web_ui_saves_the_same_project_yaml(runtime_env) -> None:
     payload = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
     assert payload["data"] == [{"path": "data", "flag": "--data-root"}]
     assert payload["launch"]["baseline_config"] == "configs/base.yaml"
+    assert payload["output"] == {"config_path": None}
     assert payload["run"]["fixed_args"] == [{"flag": "--max-iter", "value": 10}]
     assert "tuning" not in payload
     tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))

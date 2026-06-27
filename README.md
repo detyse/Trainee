@@ -9,7 +9,7 @@ It does not contain your training code. Instead, it connects to an existing trai
 The intended loop is:
 
 ```text
-read project context -> run training -> monitor heartbeat -> parse metrics
+read project context -> run training -> monitor activity -> parse metrics
 -> compare with baseline / best-so-far -> decide next params -> continue or stop
 ```
 
@@ -19,7 +19,7 @@ read project context -> run training -> monitor heartbeat -> parse metrics
 - Automatic discovery of likely entrypoints, data directories, config files, environment type, and fixed training-limit flags.
 - Structured launch commands for `system`, `uv`, `.venv`, and `conda` environments.
 - A guarded execution mode using `bubblewrap`, where the project is read-only and only `.trainee/` is writable.
-- Heartbeat monitoring from stdout, stderr, log-file modification times, or heartbeat JSON files.
+- Passive activity monitoring from stdout, stderr, log-file modification times, or heartbeat JSON files.
 - Metric extraction from stdout regexes, log regexes, JSONL files, and W&B summary files.
 - Baseline-first research state, best-so-far tracking, hypothesis/change-summary tracking, and rejected-change avoidance.
 - Session reports and ledgers exported as Markdown, CSV, JSONL, and JSON.
@@ -108,14 +108,15 @@ Initialization is non-destructive by default. Existing files are kept.
 ```bash
 trainee init
 trainee init --baseline-config configs/base.yaml
+trainee prepare
 trainee init --force
 ```
 
 `--baseline-config` must point to an existing file inside the project. Trainee records it as `launch.baseline_config`; each round copies it to `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that generated path to the launcher as `--config <path>`.
 
-When a new config is initialized with `--baseline-config`, Trainee uses the project context and baseline config to generate `.trainee/tuning.yaml` params automatically. It uses the configured LLM when available and falls back to conservative heuristics. Review the generated whitelist before running. `launch.args` and `run.fixed_args` are excluded from discovery.
+`trainee init` does not infer tunable parameters or output paths. Fill `output.config_path` with the field in `launch.baseline_config` that controls the training output directory, then run `trainee prepare`. Prepare reads the project context and baseline config, validates configured fields, and fills an empty `.trainee/tuning.yaml`. Tunable discovery uses the configured LLM when available and falls back to conservative heuristics. Review generated config before running. `launch.args` and `run.fixed_args` are excluded from discovery.
 
-You can also run `trainee init`, edit `launch.baseline_config` in `.trainee/project.yaml`, then run `trainee init` again. The second run keeps `project.yaml` and fills an empty `.trainee/tuning.yaml` from the selected baseline config.
+You can run `trainee init`, edit `launch.baseline_config` and `output.config_path` in `.trainee/project.yaml`, then run `trainee prepare`. Prepare keeps existing project settings and fills generated tuning params when needed.
 
 Detected config files are suggestions only. Trainee does not automatically choose `config.yaml`, `environment.yml`, or any other config as the baseline.
 
@@ -150,6 +151,9 @@ run:
     - flag: --max-iter
       value: 1000
 
+output:
+  config_path: output.root
+
 metrics:
   specs:
     - name: val_loss
@@ -163,8 +167,6 @@ advanced:
   security_mode: guarded
   working_dir: .
   heartbeat_interval_sec: 5
-  stall_timeout_sec: 120
-  kill_on_stall: true
   signal_sources:
     - type: stdout
     - type: log_file_mtime
@@ -177,6 +179,8 @@ advanced:
   wandb_enabled: false
   tuning_prompt: "Change only one high-impact parameter per round unless the evidence is strong."
 ```
+
+`run.timeout_minutes` is the only in-flight hard termination condition. Activity monitoring is passive: it updates runtime UI state but never kills a process or marks a round failed.
 
 Example `.trainee/tuning.yaml`:
 
@@ -220,7 +224,9 @@ Trainee appends arguments in this order:
 
 Only `tuning.yaml` params may be changed by the agent. `launch.args` and `run.fixed_args` stay constant across every round and exclude matching names, flags, or config path keys from tuning discovery.
 
-`trainee init --baseline-config ...` writes discovered parameters into `.trainee/tuning.yaml` and reminds you to review them. If you set `launch.baseline_config` later in `.trainee/project.yaml`, rerun `trainee init` to fill an empty `tuning.yaml`. `trainee tunables discover` can rerun discovery later; discovery returns up to 32 suggestions by default. The Web UI keeps an explicit review step before saving suggestions, and the tool API exposes separate suggest/apply calls.
+Use `output.config_path` when the training program reads its output directory from `launch.baseline_config` instead of a CLI flag. Set it to the dot-separated baseline config field that controls the output directory, such as `output.root`. Trainee validates the selected key, then deterministically rewrites that YAML field in each generated round config before launch. The runtime value is generated internally as `.trainee/runs/session-XXXX/round-XXXX/outputs`; it is not agent-controlled, and `output.config_path` must not also appear in `tuning.yaml`.
+
+`trainee prepare` writes discovered parameters into `.trainee/tuning.yaml` and reminds you to review them. If you set `launch.baseline_config` later in `.trainee/project.yaml`, run `trainee prepare` to fill an empty `tuning.yaml`. `trainee tunables discover` can rerun discovery later; discovery returns up to 32 suggestions by default. The Web UI keeps an explicit review step before saving suggestions, and the tool API exposes separate suggest/apply calls.
 
 Use `params[].config_path` in `tuning.yaml` for agent-controlled edits to fields inside `launch.baseline_config`. Config-backed tunable parameters are written into the generated per-round config and are not appended as CLI flags. If `params` is empty, Trainee still writes the per-round config unchanged; the agent simply has no approved parameters to change.
 
@@ -364,6 +370,7 @@ Use `advanced.tuning_prompt` for run-specific tuning strategy.
 ```bash
 trainee version
 trainee init [project_root] [--baseline-config PATH] [--force]
+trainee prepare [project_root] [--replace]
 trainee tunables discover [project_root] [--apply] [--replace] [--limit N]
 trainee doctor [project_root]
 trainee run [project_root] [--dry-run] [--guarded | --unsafe]
@@ -465,13 +472,14 @@ Before using Trainee on a real training project:
 2. Run `trainee init` and review `.trainee/project.yaml` plus `.trainee/tuning.yaml`.
 3. Confirm `data` paths exist and stay inside the project root.
 4. Confirm `launch.command`, `launch.baseline_config`, `launch.args`, and `run.fixed_args` reproduce the intended baseline command.
-5. Confirm only safe parameters are listed in `.trainee/tuning.yaml`.
-6. Confirm metrics can be parsed from stdout, `.trainee/` logs, JSONL, or W&B summary.
-7. For guarded mode, make the training job write logs, checkpoints, W&B files, and caches under `.trainee/`.
-8. Run `trainee doctor`.
-9. Run `trainee run --dry-run` and inspect the printed command.
-10. Configure an LLM provider if you expect non-trivial tuning decisions.
-11. Start with a small `max_rounds` and short timeout before increasing the budget.
+5. Run `trainee prepare` and review generated output and tuning configuration.
+6. Confirm only safe parameters are listed in `.trainee/tuning.yaml`.
+7. Confirm metrics can be parsed from stdout, `.trainee/` logs, JSONL, or W&B summary.
+8. For guarded mode, make the training job write logs, checkpoints, W&B files, and caches under `.trainee/`.
+9. Run `trainee doctor`.
+10. Run `trainee run --dry-run` and inspect the printed command.
+11. Configure an LLM provider if you expect non-trivial tuning decisions.
+12. Start with a small `max_rounds` and short timeout before increasing the budget.
 
 ## Development
 

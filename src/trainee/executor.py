@@ -30,7 +30,6 @@ class ExecutionResult:
     exit_code: Optional[int]
     started_at: str
     ended_at: str
-    stalled: bool
     wandb_run_url: Optional[str]
     last_signal_at: Optional[str]
     terminated_reason: Optional[str] = None
@@ -145,7 +144,6 @@ class TrainingExecutor:
         terminated_reason = await self._wait_for_completion(
             process=process,
             spec=spec,
-            state=state,
             wait_task=wait_task,
             stop_task=stop_task,
         )
@@ -178,7 +176,6 @@ class TrainingExecutor:
             exit_code=exit_code,
             started_at=started_at,
             ended_at=ended_at,
-            stalled=state.stalled,
             wandb_run_url=state.wandb_run_url,
             last_signal_at=state.last_signal_at,
             terminated_reason=terminated_reason,
@@ -189,7 +186,6 @@ class TrainingExecutor:
         *,
         process: asyncio.subprocess.Process,
         spec: ProjectSpec,
-        state: "_ExecutionState",
         wait_task: asyncio.Task[int],
         stop_task: Optional[asyncio.Task[bool]],
     ) -> Optional[str]:
@@ -209,9 +205,6 @@ class TrainingExecutor:
             if deadline is not None and loop.time() >= deadline:
                 await self.kill_process(process)
                 return "timeout"
-            if spec.kill_on_stall and state.stalled:
-                await self.kill_process(process)
-                return "stall"
         return None
 
     async def kill_process(self, process: asyncio.subprocess.Process, grace_sec: float = 10.0) -> None:
@@ -287,6 +280,10 @@ class TrainingExecutor:
             if not param.config_path or param.name not in values:
                 continue
             set_config_value(payload, param.config_path, param.normalize_value(values[param.name]))
+        if spec.output is not None:
+            output_path = self.render_output_path(spec, workspace)
+            self._validate_output_path(spec, output_path)
+            set_config_value(payload, spec.output.config_path, output_path)
 
         workspace.config_path.parent.mkdir(parents=True, exist_ok=True)
         workspace.config_path.write_text(
@@ -294,6 +291,40 @@ class TrainingExecutor:
             encoding="utf-8",
         )
         return workspace.config_path
+
+    def render_output_path(self, spec: ProjectSpec, workspace: RoundWorkspace) -> str:
+        if spec.output is None:
+            raise ValueError("output is not configured")
+        variables = self._config_template_vars(spec, workspace)
+        try:
+            return spec.output.path.format_map(variables)
+        except KeyError as exc:
+            name = str(exc.args[0])
+            raise ValueError(f"output.path references unknown template variable: {name}") from exc
+
+    def _config_template_vars(self, spec: ProjectSpec, workspace: RoundWorkspace) -> Dict[str, str]:
+        project_root = Path(spec.project_root).expanduser().resolve()
+        working_dir = Path(spec.working_dir).expanduser().resolve()
+        return {
+            "project_root": str(project_root),
+            "working_dir": str(working_dir),
+            "trainee_dir": str(project_trainee_dir(project_root)),
+            "session_id": str(workspace.session_id),
+            "round_index": str(workspace.round_index),
+            "session_dir": str(workspace.session_dir),
+            "round_dir": str(workspace.round_dir),
+            "config_path": str(workspace.config_path),
+        }
+
+    def _validate_output_path(self, spec: ProjectSpec, raw_path: str) -> None:
+        project_root = Path(spec.project_root).expanduser().resolve()
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        candidate = candidate.resolve()
+        self._ensure_within(candidate, project_root, "output.path")
+        if spec.security_mode == "guarded":
+            self._ensure_within(candidate, project_trainee_dir(project_root), "output.path")
 
     def round_workspace(self, spec: ProjectSpec, session_id: int, round_index: int) -> RoundWorkspace:
         trainee_dir = project_trainee_dir(Path(spec.project_root))
@@ -424,13 +455,6 @@ class TrainingExecutor:
             await asyncio.sleep(spec.heartbeat_interval_sec)
             external_signal = self._latest_external_signal(signal_log_paths)
             last_signal = self._latest_signal(state.last_signal_at, external_signal)
-            is_stalled = False
-            if last_signal:
-                last_signal_dt = datetime.fromisoformat(last_signal)
-                age = (datetime.now(timezone.utc) - last_signal_dt).total_seconds()
-                is_stalled = age > spec.stall_timeout_sec
-            if is_stalled:
-                state.stalled = True
             await heartbeat(
                 {
                     "status": "heartbeat",
@@ -438,7 +462,6 @@ class TrainingExecutor:
                     "round_index": round_index,
                     "last_signal_at": last_signal,
                     "last_output_line": state.last_output_line,
-                    "stalled": is_stalled,
                     "wandb_run_url": state.wandb_run_url,
                 }
             )
@@ -482,4 +505,3 @@ class _ExecutionState:
     last_signal_at: Optional[str] = None
     last_output_line: str = ""
     wandb_run_url: Optional[str] = None
-    stalled: bool = False
