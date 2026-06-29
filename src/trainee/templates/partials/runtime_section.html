@@ -1,4 +1,4 @@
-<section id="runtime-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+<section id="runtime-section" class="panel panel-full" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
   <div class="panel-header">
     <div>
       <p class="panel-kicker">Runtime</p>
@@ -40,7 +40,7 @@
       <p class="muted">Runtime health only checks the service and database. Use this to verify live LLM authentication.</p>
     </div>
     <button class="secondary" type="button" onclick="window.testProvider()">Test Provider</button>
-    <pre id="provider-test-output" class="agent-trace-output"></pre>
+    <pre class="agent-trace-output provider-test-output"></pre>
   </div>
 
   <form

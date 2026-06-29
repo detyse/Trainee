@@ -280,6 +280,7 @@ If no `tuning.yaml` params are configured, Trainee runs the latest result collec
 
 By default, project runtime data is stored under the training project’s `.trainee/` directory:
 
+- `.trainee/project.yaml`, `.trainee/tuning.yaml`, `.trainee/context.md` — project-level Trainee files.
 - `.trainee/runtime.sqlite3` — local run database.
 - `.trainee/artifacts/session-XXXX/round-XXXX.log` — captured stdout/stderr.
 - `.trainee/artifacts/session-XXXX/report.md` — Markdown session report.
@@ -288,7 +289,9 @@ By default, project runtime data is stored under the training project’s `.trai
 - `.trainee/artifacts/session-XXXX/research_state.json` — baseline, best-so-far, recent rounds, tried changes, and rejected changes.
 - `.trainee/runs/session-XXXX/round-XXXX/` — per-round workspace.
 
-Set `TRAINEE_DATA_DIR` to store runtime data elsewhere.
+When `trainee`, `trainee serve`, or `trainee webui` is started without a bound project, service runtime data is stored under `~/.trainee/runtime/`.
+
+Set `TRAINEE_DATA_DIR` to store runtime data elsewhere. This only changes the runtime database/artifact location; project configuration still lives in the project’s `.trainee/` directory.
 
 ## Guarded vs unsafe execution
 
@@ -376,8 +379,8 @@ trainee prepare [project_root] [--replace] [--skip-provider-test]
 trainee tunables discover [project_root] [--apply] [--replace] [--limit N]
 trainee doctor [project_root] [--skip-provider-test]
 trainee run [project_root] [--dry-run] [--guarded | --unsafe]
-trainee webui [--host HOST] [--port PORT] [--reload] [--no-open]
-trainee serve [--host HOST] [--port PORT] [--reload]
+trainee webui [project_root] [--host HOST] [--port PORT] [--reload] [--no-open]
+trainee serve [project_root] [--host HOST] [--port PORT] [--reload]
 trainee tools [--base-url URL] [--name TOOL_NAME]
 trainee call TOOL_NAME --input JSON_OR_@FILE_OR_-
 trainee report SESSION_ID [--output report.md]
@@ -397,6 +400,12 @@ Start the UI:
 trainee webui
 ```
 
+Bind the UI to a training project:
+
+```bash
+trainee webui /path/to/training-project
+```
+
 The UI can:
 
 - Register or edit a training project.
@@ -411,13 +420,13 @@ The UI can:
 To start the service without opening a browser:
 
 ```bash
-trainee serve
+trainee serve /path/to/training-project
 ```
 
 or:
 
 ```bash
-trainee webui --no-open
+trainee webui /path/to/training-project --no-open
 ```
 
 ## Tool API

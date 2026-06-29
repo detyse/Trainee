@@ -95,6 +95,12 @@ trainee run --unsafe
 trainee webui
 ```
 
+如果要直接绑定某个训练项目：
+
+```bash
+trainee webui /path/to/training-project
+```
+
 默认访问：
 
 ```text
@@ -104,6 +110,8 @@ http://127.0.0.1:8000
 Web UI 可用于项目设置、循环控制、prompt 预览、运行检查、provider 设置和报告查看。
 
 Web UI 的 runtime health 只表示服务和数据库健康；LLM 鉴权需要使用 Provider Settings 里的 provider live test 或 `/llm-test`。
+
+不绑定项目时，`trainee`、`trainee serve` 和 `trainee webui` 的服务 runtime 数据会写入 `~/.trainee/runtime/`。绑定项目或设置 `TRAINEE_PROJECT_ROOT` 后，runtime 数据仍写入该训练项目的 `.trainee/`。`TRAINEE_DATA_DIR` 只改变 runtime 数据库和 artifact 的位置，不改变 `.trainee/project.yaml`、`.trainee/tuning.yaml` 等项目配置文件的位置。
 
 ## 配置要点
 
@@ -190,3 +198,12 @@ command:
 - 创建本文档作为本 session 后续对话的使用说明汇总位置。
 - 当前约定：后续如果对 Trainee 的使用方法、配置方式、命令、排查步骤或实现决策有新增结论，将同步追加到本节。
 - 使用案例：conda 环境名为 `ANSR` 时，`launch.environment` 写 `conda`，`launch.env_name` 写 `ANSR`。
+
+
+# 一些给用户的 tips
+
+- 参考 config 最好把所有可能需要调整/想让agent调的可调参数 都暴露出来, 
+
+- README 会自动变成 context.md, so 最好写一些项目的计算方法? 
+
+- 

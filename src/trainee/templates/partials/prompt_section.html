@@ -1,12 +1,47 @@
 <section id="prompt-section" class="panel panel-full" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
   <div class="panel-header">
     <div>
-      <p class="panel-kicker">System Prompt</p>
-      <h2>Global Instructions And Model Request</h2>
+      <p class="panel-kicker">Prompts</p>
+      <h2>Fixed Prompts And Model Request</h2>
     </div>
     {% if prompt_preview %}
       <span class="status-pill status-{{ prompt_preview.status|replace('_', '-') }}">{{ prompt_preview.status }}</span>
     {% endif %}
+  </div>
+
+  <div class="settings-box fixed-prompt-inventory">
+    <div class="panel-header compact">
+      <div>
+        <p class="panel-kicker">Fixed Prompt Inventory</p>
+        <h3>Prompts that do not come from project.yaml or tuning.yaml</h3>
+      </div>
+      <span class="muted">{{ fixed_prompts|length if fixed_prompts is defined else 0 }} listed</span>
+    </div>
+    <p class="muted">
+      Project-specific fields such as metric prompt, tuning prompt, visuals.prompt, context.md, constraints.md,
+      and round history are excluded here because they change with the project or run.
+    </p>
+    <div class="fixed-prompt-list">
+      {% for item in fixed_prompts|default([]) %}
+        <details class="prompt-payload">
+          <summary>{{ item.name }}</summary>
+          <div class="prompt-meta prompt-meta-compact">
+            <div>
+              <span class="label">Used for</span>
+              <strong>{{ item.used_for }}</strong>
+            </div>
+            <div>
+              <span class="label">Source</span>
+              <strong>{{ item.source }}</strong>
+            </div>
+          </div>
+          {% if item.notes %}
+            <p class="muted">{{ item.notes }}</p>
+          {% endif %}
+          <pre class="prompt-pre tall">{{ item.prompt }}</pre>
+        </details>
+      {% endfor %}
+    </div>
   </div>
 
   <form

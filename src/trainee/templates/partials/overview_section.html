@@ -1,0 +1,61 @@
+<section id="overview-section" class="panel panel-full" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Overview</p>
+      <h2>Runtime Console</h2>
+    </div>
+    <span class="status-pill status-{{ loop.status|replace('_', '-') }}">{{ loop.status }}</span>
+  </div>
+
+  <div class="overview-grid">
+    <div class="settings-box">
+      <div class="overview-metrics">
+        <div>
+          <span class="label">Project</span>
+          <strong>{{ spec.project_root if spec else "not registered" }}</strong>
+        </div>
+        <div>
+          <span class="label">Provider</span>
+          <strong>{{ runtime_settings.llm_provider }} / {{ runtime_settings.active_model }}</strong>
+        </div>
+        <div>
+          <span class="label">Current round</span>
+          <strong>{{ loop.current_round_index }}</strong>
+        </div>
+        <div>
+          <span class="label">Recorded rounds</span>
+          <strong>{{ rounds|length }}</strong>
+        </div>
+      </div>
+      <p class="loop-message">{{ loop.message or "No active loop." }}</p>
+    </div>
+
+    <div class="settings-box">
+      <p class="panel-kicker">Readiness</p>
+      <ul class="readiness-list">
+        <li class="{{ 'ready' if spec else 'missing' }}">Project registered</li>
+        <li class="{{ 'ready' if spec and spec.launcher_template else 'missing' }}">Launch command configured</li>
+        <li class="{{ 'ready' if spec and spec.output else 'missing' }}">Output config path configured</li>
+        <li class="{{ 'ready' if spec and spec.tunable_params else 'missing' }}">Tunable parameters configured</li>
+        <li class="{{ 'ready' if spec else 'missing' }}">Metrics parser available</li>
+        <li class="{{ 'ready' if runtime_settings.llm_provider != 'none' else 'missing' }}">Provider selected</li>
+        <li class="{{ 'ready' if health.db_ok else 'missing' }}">Runtime database ok</li>
+      </ul>
+    </div>
+
+    <div class="settings-box">
+      <p class="panel-kicker">Quick Actions</p>
+      <div class="actions">
+        <form method="post" action="/ui/loop/start" hx-post="/ui/loop/start" hx-target="#overview-section" hx-swap="outerHTML">
+          <button class="primary" type="submit" {% if not spec %}disabled{% endif %}>Start Loop</button>
+        </form>
+        <form method="post" action="/ui/loop/stop" hx-post="/ui/loop/stop" hx-target="#overview-section" hx-swap="outerHTML">
+          <button class="secondary" type="submit">Stop After Current Round</button>
+        </form>
+        <button class="secondary" type="button" onclick="window.testProvider()">Test Provider</button>
+        <a class="nav-button" href="/llm-test">LLM API Test</a>
+      </div>
+      <pre class="agent-trace-output compact-output provider-test-output"></pre>
+    </div>
+  </div>
+</section>

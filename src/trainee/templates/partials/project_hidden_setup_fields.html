@@ -1,0 +1,21 @@
+<textarea hidden name="data_lines">{% if cfg %}{% for item in cfg.data %}{{ item.path }}{% if item.flag %} | {{ item.flag }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
+<input type="hidden" name="launch_environment" value="{{ cfg.launch.environment if cfg else 'system' }}" />
+<input type="hidden" name="launch_env_name" value="{{ cfg.launch.env_name or '' if cfg else '' }}" />
+<input type="hidden" name="launch_command" value="{{ cfg.launch.command | join(' ') if cfg else 'python train.py' }}" />
+<input type="hidden" name="baseline_config" value="{{ cfg.launch.baseline_config or '' if cfg else '' }}" />
+<input type="hidden" name="output_config_path" value="{{ cfg.output.config_path or '' if cfg and cfg.output else '' }}" />
+<textarea hidden name="launch_args_lines">{% if cfg %}{% for item in cfg.launch.args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
+<input type="hidden" name="max_rounds" value="{{ cfg.run.max_rounds if cfg else 3 }}" />
+<input type="hidden" name="timeout_minutes" value="{{ cfg.run.timeout_minutes if cfg and cfg.run.timeout_minutes is not none else '' }}" />
+<textarea hidden name="fixed_args_lines">{% if cfg %}{% for item in cfg.run.fixed_args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
+<input type="hidden" name="working_dir" value="{{ cfg.advanced.working_dir or '.' if cfg else '.' }}" />
+<input type="hidden" name="security_mode" value="{{ cfg.advanced.security_mode if cfg else 'guarded' }}" />
+{% if cfg and cfg.advanced.wandb_enabled %}
+  <input type="hidden" name="wandb_enabled" value="on" />
+{% endif %}
+<textarea hidden name="advanced_yaml">{% if cfg %}{{ {
+  "heartbeat_interval_sec": cfg.advanced.heartbeat_interval_sec,
+  "signal_sources": cfg.advanced.signal_sources,
+  "log_paths": cfg.advanced.log_paths,
+  "shell_command": cfg.advanced.shell_command
+} | toyaml }}{% endif %}</textarea>

@@ -1,0 +1,138 @@
+<section id="setup-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  {% set cfg = project_config %}
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Setup</p>
+      <h2>Project And Launch</h2>
+    </div>
+    <span class="muted">{{ project_config_path or "Run trainee init first" }}</span>
+  </div>
+
+  <form
+    class="stacked-form"
+    method="post"
+    action="/ui/project/register"
+    hx-post="/ui/project/register"
+    hx-target="#setup-section"
+    hx-swap="outerHTML"
+  >
+    <input type="hidden" name="tunable_reviewed" value="1" />
+    {% include "partials/project_hidden_optimization_fields.html" %}
+
+    <label>
+      <span>Project root</span>
+      <input type="text" name="project_root" value="{{ spec.project_root if spec else runtime_settings.launch_project_root }}" placeholder="/path/to/project" />
+    </label>
+
+    <div class="settings-box">
+      <div class="panel-header compact">
+        <div>
+          <p class="panel-kicker">1. Data</p>
+          <h3>Training inputs</h3>
+        </div>
+      </div>
+      <label>
+        <span>One path per line; optionally add <code>| --flag</code></span>
+        <textarea name="data_lines" rows="4" placeholder="data/train | --data-root">{% if cfg %}{% for item in cfg.data %}{{ item.path }}{% if item.flag %} | {{ item.flag }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
+      </label>
+    </div>
+
+    <div class="settings-box">
+      <div class="panel-header compact">
+        <div>
+          <p class="panel-kicker">2. Launch</p>
+          <h3>Environment and command</h3>
+        </div>
+      </div>
+      <div class="three-col">
+        <label>
+          <span>Environment</span>
+          <select name="launch_environment">
+            {% for name in ["system", "uv", "venv", "conda"] %}
+              <option value="{{ name }}" {% if cfg and cfg.launch.environment == name %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Conda env name</span>
+          <input type="text" name="launch_env_name" value="{{ cfg.launch.env_name or '' if cfg else '' }}" placeholder="trainer" />
+        </label>
+        <label>
+          <span>Command</span>
+          <input type="text" name="launch_command" value="{{ cfg.launch.command | join(' ') if cfg else 'python train.py' }}" placeholder="python train.py" />
+        </label>
+      </div>
+      <label>
+        <span>Baseline config (project-relative, optional)</span>
+        <input type="text" name="baseline_config" value="{{ cfg.launch.baseline_config or '' if cfg else '' }}" placeholder="configs/base.yaml" />
+      </label>
+      <label>
+        <span>Output config path</span>
+        <input type="text" name="output_config_path" value="{{ cfg.output.config_path or '' if cfg and cfg.output else '' }}" placeholder="output.root" />
+      </label>
+      <label>
+        <span>Launch arguments, one per line as <code>--flag=value</code></span>
+        <textarea name="launch_args_lines" rows="4" placeholder="--config=configs/base.yaml">{% if cfg %}{% for item in cfg.launch.args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
+      </label>
+    </div>
+
+    <div class="settings-box">
+      <div class="panel-header compact">
+        <div>
+          <p class="panel-kicker">3. Budget</p>
+          <h3>Fixed run limits</h3>
+        </div>
+      </div>
+      <div class="three-col">
+        <label>
+          <span>Max rounds</span>
+          <input type="number" min="1" step="1" name="max_rounds" value="{{ cfg.run.max_rounds if cfg else 3 }}" />
+        </label>
+        <label>
+          <span>Timeout per round (minutes)</span>
+          <input type="number" min="0.1" step="0.1" name="timeout_minutes" value="{{ cfg.run.timeout_minutes if cfg and cfg.run.timeout_minutes is not none else '' }}" />
+        </label>
+        <label>
+          <span>Fixed arguments</span>
+          <textarea name="fixed_args_lines" rows="4" placeholder="--max-iter=1000">{% if cfg %}{% for item in cfg.run.fixed_args %}{{ item.flag }}{% if item.value is not none %}={{ item.value }}{% endif %}{{ "\n" }}{% endfor %}{% endif %}</textarea>
+        </label>
+      </div>
+      <p class="muted">Fixed arguments are identical in every round and exclude matching names or flags from tunable parameters.</p>
+    </div>
+
+    <details class="settings-box">
+      <summary>Advanced runtime settings</summary>
+      <div class="three-col detail-spacing">
+        <label>
+          <span>Working dir</span>
+          <input type="text" name="working_dir" value="{{ cfg.advanced.working_dir or '.' if cfg else '.' }}" />
+        </label>
+        <label>
+          <span>Security mode</span>
+          <select name="security_mode">
+            <option value="guarded" {% if not cfg or cfg.advanced.security_mode == "guarded" %}selected{% endif %}>guarded</option>
+            <option value="unsafe" {% if cfg and cfg.advanced.security_mode == "unsafe" %}selected{% endif %}>unsafe</option>
+          </select>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" name="wandb_enabled" {% if cfg and cfg.advanced.wandb_enabled %}checked{% endif %} />
+          <span>W&amp;B enabled</span>
+        </label>
+      </div>
+      <label>
+        <span>Additional advanced YAML</span>
+        <textarea name="advanced_yaml" rows="8" placeholder="heartbeat_interval_sec: 5&#10;shell_command: null">{% if cfg %}{{ {
+          "heartbeat_interval_sec": cfg.advanced.heartbeat_interval_sec,
+          "signal_sources": cfg.advanced.signal_sources,
+          "log_paths": cfg.advanced.log_paths,
+          "shell_command": cfg.advanced.shell_command
+        } | toyaml }}{% endif %}</textarea>
+      </label>
+    </details>
+
+    <div class="actions">
+      <button class="primary" type="submit">Save setup</button>
+      <button class="secondary" type="button" onclick="window.switchTab && window.switchTab('optimization')">Configure optimization</button>
+    </div>
+  </form>
+</section>

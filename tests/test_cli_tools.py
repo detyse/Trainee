@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 
 import pytest
@@ -392,11 +393,69 @@ def test_webui_command_opens_browser_and_starts_service(monkeypatch):
     assert captured["reload"] is True
 
 
+def test_webui_command_binds_project_root_and_restores_env(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    previous_project = tmp_path / "previous"
+    previous_project.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_run(app, host, port, reload):
+        captured["app"] = app
+        captured["project_root"] = os.environ.get("TRAINEE_PROJECT_ROOT")
+
+    monkeypatch.setenv("TRAINEE_PROJECT_ROOT", str(previous_project))
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+
+    exit_code = main(["webui", str(project), "--no-open"])
+
+    assert exit_code == 0
+    assert captured["app"] == "trainee.app:app"
+    assert captured["project_root"] == str(project.resolve())
+    assert os.environ["TRAINEE_PROJECT_ROOT"] == str(previous_project)
+
+
+def test_serve_command_binds_project_root(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_run(app, host, port, reload):
+        captured["app"] = app
+        captured["project_root"] = os.environ.get("TRAINEE_PROJECT_ROOT")
+
+    monkeypatch.delenv("TRAINEE_PROJECT_ROOT", raising=False)
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+
+    exit_code = main(["serve", str(project)])
+
+    assert exit_code == 0
+    assert captured["app"] == "trainee.app:app"
+    assert captured["project_root"] == str(project.resolve())
+    assert "TRAINEE_PROJECT_ROOT" not in os.environ
+
+
+def test_serve_command_rejects_invalid_project_root(tmp_path, capsys, monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(app, host, port, reload):
+        captured["called"] = True
+
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+
+    exit_code = main(["serve", str(tmp_path / "missing")])
+
+    assert exit_code == 1
+    assert "project root does not exist or is not a directory" in capsys.readouterr().err
+    assert "called" not in captured
+
+
 def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.1.4\nLast updated: 2026-06-29 19:38:47 +08:00\n"
+    assert capsys.readouterr().out == "Trainee 0.1.5\nLast updated: 2026-06-29 19:38:47 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys, monkeypatch):

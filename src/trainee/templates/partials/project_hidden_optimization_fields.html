@@ -1,0 +1,11 @@
+<textarea hidden name="tunable_params_yaml">{{ cfg.tuning.params | toyaml if cfg else '[]' }}</textarea>
+<textarea hidden name="metric_specs_yaml">{{ cfg.metrics.specs | toyaml if cfg else '[]' }}</textarea>
+<textarea hidden name="metric_prompt">{{ cfg.metrics.prompt if cfg else '' }}</textarea>
+<textarea hidden name="tuning_prompt">{{ cfg.advanced.tuning_prompt if cfg else '' }}</textarea>
+<textarea hidden name="visuals_yaml">{{ cfg.visuals | toyaml if cfg else {
+  "enabled": false,
+  "patterns": ["{round_output_dir}/**/*.png", "{round_dir}/outputs/**/*.png"],
+  "max_images_per_round": 3,
+  "selection": "newest",
+  "prompt": "Analyze these as training diagnostic plots."
+} | toyaml }}</textarea>

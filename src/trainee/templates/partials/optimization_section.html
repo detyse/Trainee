@@ -1,0 +1,99 @@
+<section id="optimization-section" class="panel panel-wide" {% if oob|default(false) %}hx-swap-oob="outerHTML"{% endif %}>
+  {% set cfg = project_config %}
+  <div class="panel-header">
+    <div>
+      <p class="panel-kicker">Optimization</p>
+      <h2>Tunables, Metrics, And Prompts</h2>
+    </div>
+    <span class="muted">{{ tuning_config_path or "Save setup first" }}</span>
+  </div>
+
+  <form
+    class="stacked-form"
+    method="post"
+    action="/ui/project/register"
+    hx-post="/ui/project/register"
+    hx-target="#optimization-section"
+    hx-swap="outerHTML"
+  >
+    {% if tunable_discovery is defined and tunable_discovery %}
+      <input type="hidden" name="tunable_reviewed" value="1" />
+      <div class="notice">
+        Suggested {{ tunable_discovery.suggestions | length }} tunable parameter{{ "" if tunable_discovery.suggestions | length == 1 else "s" }}
+        from {{ tunable_discovery.source }} discovery
+        {% if tunable_discovery.candidates %}out of {{ tunable_discovery.candidates | length }} review candidate{{ "" if tunable_discovery.candidates | length == 1 else "s" }}{% endif %}.
+        Review the YAML below, then save tuning.yaml to approve.
+        {% for warning in tunable_discovery.warnings %}
+          <br /><span class="muted">{{ warning }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <label>
+      <span>Project root</span>
+      <input type="text" name="project_root" value="{{ spec.project_root if spec else runtime_settings.launch_project_root }}" placeholder="/path/to/project" />
+    </label>
+    {% include "partials/project_hidden_setup_fields.html" %}
+
+    <div class="two-col">
+      <label>
+        <span>Tunable parameters (YAML list)</span>
+        <textarea name="tunable_params_yaml" rows="12" placeholder="- name: lr&#10;  flag: --lr&#10;  type: float&#10;  default: 0.001&#10;  min_value: 0.00001&#10;  max_value: 0.1">{{ cfg.tuning.params | toyaml if cfg else '[]' }}</textarea>
+      </label>
+      <label>
+        <span>Metrics (YAML list)</span>
+        <textarea name="metric_specs_yaml" rows="12" placeholder="- name: total_loss&#10;  source: stdout_regex&#10;  key_or_pattern: 'total_loss=(?P&lt;value&gt;[0-9.]+)'&#10;  goal: min">{{ cfg.metrics.specs | toyaml if cfg else '[]' }}</textarea>
+      </label>
+    </div>
+
+    <div class="two-col">
+      <label>
+        <span>Metric prompt</span>
+        <textarea id="metric-prompt-input" name="metric_prompt" rows="4">{{ cfg.metrics.prompt if cfg else '' }}</textarea>
+      </label>
+      <label>
+        <span>Tuning prompt</span>
+        <textarea id="tuning-prompt-input" name="tuning_prompt" rows="4">{{ cfg.advanced.tuning_prompt if cfg else '' }}</textarea>
+      </label>
+    </div>
+
+    <label>
+      <span>Visuals (YAML mapping)</span>
+      <textarea name="visuals_yaml" rows="7" placeholder="enabled: true&#10;patterns:&#10;  - &quot;{round_output_dir}/**/*.png&quot;&#10;  - &quot;{round_dir}/outputs/**/*.png&quot;&#10;max_images_per_round: 3&#10;selection: newest&#10;prompt: Analyze these as training diagnostic plots.">{{ cfg.visuals | toyaml if cfg else {
+        "enabled": false,
+        "patterns": ["{round_output_dir}/**/*.png", "{round_dir}/outputs/**/*.png"],
+        "max_images_per_round": 3,
+        "selection": "newest",
+        "prompt": "Analyze these as training diagnostic plots."
+      } | toyaml }}</textarea>
+    </label>
+
+    <div class="preset-box">
+      <script id="prompt-presets-data" type="application/json">{{ prompt_presets_payload | tojson }}</script>
+      <div class="preset-grid">
+        <label>
+          <span>Prompt preset</span>
+          <select id="prompt-preset-select" name="prompt_preset_id" onchange="window.applyPromptPreset && window.applyPromptPreset(this)">
+            <option value="">Select a prompt preset</option>
+            {% for preset in prompt_presets %}
+              <option value="{{ preset.id }}">{{ preset.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Preset name</span>
+          <input id="prompt-preset-name-input" type="text" name="prompt_preset_name" placeholder="e.g. fast debug" />
+        </label>
+      </div>
+      <div class="actions">
+        <button class="secondary" type="submit" formaction="/ui/prompt-presets/apply" hx-post="/ui/prompt-presets/apply" hx-target="#optimization-section" hx-swap="outerHTML">Apply Preset</button>
+        <button class="secondary" type="submit" formaction="/ui/prompt-presets/save" hx-post="/ui/prompt-presets/save" hx-target="#optimization-section" hx-swap="outerHTML">Save Prompt Preset</button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="secondary" type="submit" formaction="/ui/project/tunables/suggest" hx-post="/ui/project/tunables/suggest" hx-target="#optimization-section" hx-swap="outerHTML">Suggest Tunables</button>
+      <button class="primary" type="submit">Save optimization</button>
+    </div>
+  </form>
+</section>

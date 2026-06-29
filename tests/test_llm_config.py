@@ -13,16 +13,18 @@ from trainee.research_state import ResearchStateBuilder
 from trainee.settings import Settings, load_default_system_prompt, load_settings
 
 
-def test_load_settings_defaults_runtime_data_to_repo_and_config_to_home(tmp_path, monkeypatch):
+def test_load_settings_defaults_runtime_data_to_home_and_config_to_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("TRAINEE_DATA_DIR", raising=False)
+    monkeypatch.delenv("TRAINEE_PROJECT_ROOT", raising=False)
 
     settings = load_settings(repo_root=tmp_path / "repo")
 
-    assert settings.project_data_dir == tmp_path / "repo" / ".trainee"
+    assert settings.project_root is None
+    assert settings.project_data_dir == tmp_path / ".trainee" / "runtime"
     assert settings.data_dir == settings.project_data_dir
-    assert settings.database_path == tmp_path / "repo" / ".trainee" / "runtime.sqlite3"
-    assert settings.artifacts_dir == tmp_path / "repo" / ".trainee" / "artifacts"
+    assert settings.database_path == tmp_path / ".trainee" / "runtime" / "runtime.sqlite3"
+    assert settings.artifacts_dir == tmp_path / ".trainee" / "runtime" / "artifacts"
     assert settings.global_config_path == tmp_path / ".trainee" / "config.json"
     assert settings.config_path == settings.global_config_path
     assert settings.agent_debug_enabled is False
@@ -64,6 +66,7 @@ def test_load_settings_rejects_invalid_system_prompt(tmp_path):
 def test_load_settings_uses_project_root_for_runtime_data(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("TRAINEE_DATA_DIR", raising=False)
+    monkeypatch.delenv("TRAINEE_PROJECT_ROOT", raising=False)
     project_root = tmp_path / "project"
 
     settings = load_settings(repo_root=tmp_path / "repo", project_root=project_root)
@@ -75,8 +78,24 @@ def test_load_settings_uses_project_root_for_runtime_data(tmp_path, monkeypatch)
     assert settings.global_config_path == tmp_path / "home" / ".trainee" / "config.json"
 
 
+def test_load_settings_uses_env_project_root_for_runtime_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("TRAINEE_DATA_DIR", raising=False)
+    project_root = tmp_path / "project"
+    monkeypatch.setenv("TRAINEE_PROJECT_ROOT", str(project_root))
+
+    settings = load_settings(repo_root=tmp_path / "repo")
+
+    assert settings.project_root == project_root
+    assert settings.project_data_dir == project_root / ".trainee"
+    assert settings.database_path == project_root / ".trainee" / "runtime.sqlite3"
+    assert settings.artifacts_dir == project_root / ".trainee" / "artifacts"
+    assert settings.global_config_path == tmp_path / "home" / ".trainee" / "config.json"
+
+
 def test_load_settings_is_not_project_bound_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("TRAINEE_DATA_DIR", raising=False)
+    monkeypatch.delenv("TRAINEE_PROJECT_ROOT", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "project").mkdir()
     monkeypatch.chdir(tmp_path / "project")
@@ -86,7 +105,7 @@ def test_load_settings_is_not_project_bound_by_default(tmp_path, monkeypatch):
     assert settings.project_root is None
     assert settings.repo_root != tmp_path / "project"
     assert settings.global_config_path == tmp_path / "home" / ".trainee" / "config.json"
-    assert settings.data_dir == settings.repo_root / ".trainee"
+    assert settings.data_dir == tmp_path / "home" / ".trainee" / "runtime"
 
 
 def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
@@ -179,7 +198,7 @@ def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
 
     assert settings.repo_root == tmp_path / "project"
     assert settings.project_root is None
-    assert settings.data_dir == tmp_path / "project" / ".trainee"
+    assert settings.data_dir == tmp_path / "home" / ".trainee" / "runtime"
     assert settings.config_path == config_path
     assert settings.llm_provider == "openai"
     assert settings.openai_api_key == "config-openai-key"

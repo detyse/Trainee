@@ -268,5 +268,6 @@ def _resolve_project_data_dir(repo_root: Path, project_root: Path | None, data_d
     env_data_dir = os.getenv("TRAINEE_DATA_DIR")
     if env_data_dir:
         return _resolve_path(env_data_dir, repo_root)
-    runtime_root = project_root or repo_root
-    return (runtime_root / ".trainee").resolve()
+    if project_root is not None:
+        return (project_root / ".trainee").resolve()
+    return (Path.home() / ".trainee" / "runtime").expanduser().resolve()

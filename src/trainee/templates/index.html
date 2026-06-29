@@ -28,34 +28,51 @@
       </header>
 
       <nav class="tabs" role="tablist" aria-label="Dashboard sections">
-        <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab-target="project">Project</button>
+        <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab-target="overview">Overview</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="setup">Setup</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="optimization">Optimization</button>
         <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="prompt">Prompt</button>
-        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="runtime">Runtime</button>
-        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="runs">Runs</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="run">Run</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="history">History</button>
+        <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="settings">Settings</button>
       </nav>
 
       <main>
-        <section class="tab-panel active" role="tabpanel" data-tab-panel="project">
+        <section class="tab-panel active" role="tabpanel" data-tab-panel="overview">
           <div class="dashboard-grid">
-            {% include "partials/project_section.html" %}
-            {% include "partials/context_section.html" %}
+            {% include "partials/overview_section.html" %}
+          </div>
+        </section>
+        <section class="tab-panel" role="tabpanel" data-tab-panel="setup">
+          <div class="dashboard-grid">
+            {% include "partials/setup_section.html" %}
+          </div>
+        </section>
+        <section class="tab-panel" role="tabpanel" data-tab-panel="optimization">
+          <div class="dashboard-grid">
+            {% include "partials/optimization_section.html" %}
           </div>
         </section>
         <section class="tab-panel" role="tabpanel" data-tab-panel="prompt">
           <div class="dashboard-grid">
+            {% include "partials/context_section.html" %}
             {% include "partials/prompt_section.html" %}
           </div>
         </section>
-        <section class="tab-panel" role="tabpanel" data-tab-panel="runtime">
+        <section class="tab-panel" role="tabpanel" data-tab-panel="run">
           <div class="dashboard-grid">
-            {% include "partials/runtime_section.html" %}
             {% include "partials/loop_section.html" %}
           </div>
         </section>
-        <section class="tab-panel" role="tabpanel" data-tab-panel="runs">
+        <section class="tab-panel" role="tabpanel" data-tab-panel="history">
           <div class="dashboard-grid">
             {% include "partials/runs_section.html" %}
             {% include "partials/run_detail_section.html" %}
+          </div>
+        </section>
+        <section class="tab-panel" role="tabpanel" data-tab-panel="settings">
+          <div class="dashboard-grid">
+            {% include "partials/runtime_section.html" %}
           </div>
         </section>
       </main>
@@ -72,6 +89,7 @@
       const refreshDashboard = async () => {
         const selectedRun = document.body.dataset.selectedRun;
         await Promise.all([
+          refreshSection("#overview-section", "/fragments/overview"),
           refreshSection("#loop-section", "/fragments/loop"),
           refreshSection("#runtime-section", "/fragments/runtime"),
           refreshSection(
@@ -112,7 +130,7 @@
         button.addEventListener("click", () => window.switchTab(button.dataset.tabTarget));
       });
 
-      const initialTab = location.hash.replace("#", "") || "project";
+      const initialTab = location.hash.replace("#", "") || "overview";
       if (document.querySelector(`[data-tab-panel="${initialTab}"]`)) {
         window.switchTab(initialTab, false);
       }
@@ -128,15 +146,15 @@
       };
 
       window.testProvider = async () => {
-        const output = document.getElementById("provider-test-output");
-        if (output) {
+        const outputs = document.querySelectorAll(".provider-test-output");
+        outputs.forEach((output) => {
           output.textContent = "Testing provider...";
-        }
+        });
         const response = await fetch("/api/runtime/provider/test", { method: "POST" });
         const payload = await response.json();
-        if (output) {
+        outputs.forEach((output) => {
           output.textContent = JSON.stringify(payload, null, 2);
-        }
+        });
       };
 
       window.applyPromptPreset = (select) => {

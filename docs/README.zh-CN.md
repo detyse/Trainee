@@ -285,6 +285,7 @@ Trainee 默认会尝试从捕获的输出和已配置日志中解析内置的 `l
 
 默认情况下，运行数据存放在训练项目的 `.trainee/` 目录：
 
+- `.trainee/project.yaml`、`.trainee/tuning.yaml`、`.trainee/context.md`：项目级 Trainee 文件。
 - `.trainee/runtime.sqlite3`：本地运行数据库。
 - `.trainee/artifacts/session-XXXX/round-XXXX.log`：捕获的 stdout/stderr。
 - `.trainee/artifacts/session-XXXX/report.md`：Markdown session 报告。
@@ -293,7 +294,9 @@ Trainee 默认会尝试从捕获的输出和已配置日志中解析内置的 `l
 - `.trainee/artifacts/session-XXXX/research_state.json`：baseline、best-so-far、recent rounds、tried changes、rejected changes。
 - `.trainee/runs/session-XXXX/round-XXXX/`：每轮 workspace。
 
-可以通过 `TRAINEE_DATA_DIR` 把运行数据存到其他位置。
+如果直接运行 `trainee`、`trainee serve` 或 `trainee webui` 且没有绑定训练项目，服务运行数据会存放在 `~/.trainee/runtime/`。
+
+可以通过 `TRAINEE_DATA_DIR` 把运行数据存到其他位置。它只改变 runtime 数据库和 artifact 的位置，不改变项目配置文件的位置；项目配置仍保存在项目内 `.trainee/`。
 
 ## Guarded 与 Unsafe 模式
 
@@ -383,8 +386,8 @@ trainee prepare [project_root] [--replace] [--skip-provider-test]
 trainee tunables discover [project_root] [--apply] [--replace] [--limit N]
 trainee doctor [project_root] [--skip-provider-test]
 trainee run [project_root] [--dry-run] [--guarded | --unsafe]
-trainee webui [--host HOST] [--port PORT] [--reload] [--no-open]
-trainee serve [--host HOST] [--port PORT] [--reload]
+trainee webui [project_root] [--host HOST] [--port PORT] [--reload] [--no-open]
+trainee serve [project_root] [--host HOST] [--port PORT] [--reload]
 trainee tools [--base-url URL] [--name TOOL_NAME]
 trainee call TOOL_NAME --input JSON_OR_@FILE_OR_-
 trainee report SESSION_ID [--output report.md]
@@ -404,6 +407,12 @@ trainee report SESSION_ID [--output report.md]
 trainee webui
 ```
 
+绑定到某个训练项目：
+
+```bash
+trainee webui /path/to/training-project
+```
+
 Web UI 可以：
 
 - 注册或编辑训练项目。
@@ -418,13 +427,13 @@ Web UI 可以：
 只启动服务且不打开浏览器：
 
 ```bash
-trainee serve
+trainee serve /path/to/training-project
 ```
 
 或：
 
 ```bash
-trainee webui --no-open
+trainee webui /path/to/training-project --no-open
 ```
 
 ## Tool API

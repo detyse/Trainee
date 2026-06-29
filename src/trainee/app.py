@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData
 
 from trainee.events import EventBus
+from trainee.fixed_prompts import fixed_prompt_inventory
 from trainee.logging import configure_logging, get_logger
 from trainee.models import OutputConfig, ProjectContext, PromptPreset, VisualsConfig
 from trainee.orchestrator import RuntimeService
@@ -138,7 +139,21 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     async def index(request: Request, run_id: Optional[int] = None) -> HTMLResponse:
         runtime = get_runtime(request)
         payload = runtime.dashboard_payload(selected_run_id=run_id)
-        return templates.TemplateResponse(request, "index.html", {"request": request, **payload, "health": _health_payload(request)})
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {"request": request, **payload, "health": _health_payload(request), **_fixed_prompt_context(runtime)},
+        )
+
+    @app.get("/fragments/overview", response_class=HTMLResponse)
+    async def overview_fragment(request: Request) -> HTMLResponse:
+        runtime = get_runtime(request)
+        payload = runtime.dashboard_payload()
+        return templates.TemplateResponse(
+            request,
+            "partials/overview_section.html",
+            {"request": request, **payload, "health": _health_payload(request)},
+        )
 
     @app.get("/llm-test", response_class=HTMLResponse)
     async def llm_test(request: Request) -> HTMLResponse:
@@ -164,6 +179,18 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         runtime = get_runtime(request)
         payload = runtime.dashboard_payload()
         return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
+
+    @app.get("/fragments/setup", response_class=HTMLResponse)
+    async def setup_fragment(request: Request) -> HTMLResponse:
+        runtime = get_runtime(request)
+        payload = runtime.dashboard_payload()
+        return templates.TemplateResponse(request, "partials/setup_section.html", {"request": request, **payload})
+
+    @app.get("/fragments/optimization", response_class=HTMLResponse)
+    async def optimization_fragment(request: Request) -> HTMLResponse:
+        runtime = get_runtime(request)
+        payload = runtime.dashboard_payload()
+        return templates.TemplateResponse(request, "partials/optimization_section.html", {"request": request, **payload})
 
     @app.get("/fragments/context", response_class=HTMLResponse)
     async def context_fragment(request: Request) -> HTMLResponse:
@@ -193,7 +220,11 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     async def prompt_fragment(request: Request, run_id: Optional[int] = None) -> HTMLResponse:
         runtime = get_runtime(request)
         payload = runtime.dashboard_payload(selected_run_id=run_id)
-        return templates.TemplateResponse(request, "partials/prompt_section.html", {"request": request, **payload})
+        return templates.TemplateResponse(
+            request,
+            "partials/prompt_section.html",
+            {"request": request, **payload, **_fixed_prompt_context(runtime)},
+        )
 
     @app.get("/fragments/runtime", response_class=HTMLResponse)
     async def runtime_fragment(request: Request) -> HTMLResponse:
@@ -527,7 +558,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         payload["project_config_path"] = str(project_config_path(project_root))
         payload["tuning_config_path"] = str(tuning_config_path(project_root))
         payload["tunable_discovery"] = result
-        return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
+        return templates.TemplateResponse(request, "partials/optimization_section.html", {"request": request, **payload})
 
     @app.post("/ui/prompt-presets/save")
     async def ui_save_prompt_preset(request: Request) -> HTMLResponse:
@@ -778,6 +809,10 @@ def _health_payload(request: Request) -> Dict[str, Any]:
     }
 
 
+def _fixed_prompt_context(runtime: RuntimeService) -> Dict[str, Any]:
+    return {"fixed_prompts": fixed_prompt_inventory(runtime.settings.system_prompt)}
+
+
 async def _render_tunable_review_response(
     request: Request,
     templates: Jinja2Templates,
@@ -809,7 +844,7 @@ async def _render_tunable_review_response(
     payload["project_config_path"] = str(project_config_path(project_root))
     payload["tuning_config_path"] = str(tuning_config_path(project_root))
     payload["tunable_discovery"] = result
-    return templates.TemplateResponse(request, "partials/project_section.html", {"request": request, **payload})
+    return templates.TemplateResponse(request, "partials/optimization_section.html", {"request": request, **payload})
 
 
 async def _register_project_config(
@@ -1002,7 +1037,11 @@ async def _read_llm_test_image(image: Optional[UploadFile]) -> Optional[Dict[str
 async def _render_refresh_response(request: Request, templates: Jinja2Templates, runtime: RuntimeService) -> HTMLResponse:
     if request.headers.get("HX-Request") == "true":
         payload = runtime.dashboard_payload()
-        return templates.TemplateResponse(request, "partials/oob_dashboard.html", {"request": request, **payload, "health": _health_payload(request)})
+        return templates.TemplateResponse(
+            request,
+            "partials/oob_dashboard.html",
+            {"request": request, **payload, "health": _health_payload(request), **_fixed_prompt_context(runtime)},
+        )
     return RedirectResponse("/", status_code=303)
 
 

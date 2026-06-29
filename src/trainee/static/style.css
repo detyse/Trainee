@@ -212,6 +212,61 @@ body {
   margin-bottom: 14px;
 }
 
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.8fr);
+  gap: 16px;
+}
+
+.overview-grid .settings-box:first-child {
+  grid-column: span 2;
+}
+
+.overview-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.overview-metrics strong,
+.prompt-meta strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.readiness-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.readiness-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 250, 240, 0.62);
+}
+
+.readiness-list li::after {
+  font-weight: 700;
+}
+
+.readiness-list li.ready::after {
+  content: "ready";
+  color: var(--accent);
+}
+
+.readiness-list li.missing::after {
+  content: "missing";
+  color: var(--warn);
+}
+
 .actions {
   grid-template-columns: repeat(2, minmax(0, max-content));
   align-items: center;
@@ -441,6 +496,21 @@ pre {
   margin-top: 14px;
 }
 
+.fixed-prompt-inventory {
+  margin-bottom: 18px;
+}
+
+.fixed-prompt-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.prompt-meta-compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
 .prompt-payload summary {
   cursor: pointer;
   color: var(--accent);
@@ -449,6 +519,10 @@ pre {
 
 .detail-spacing {
   margin: 14px 0;
+}
+
+.compact-output:empty {
+  display: none;
 }
 
 details.settings-box > summary {
@@ -480,9 +554,15 @@ details.settings-box > summary {
   .two-col,
   .three-col,
   .preset-grid,
+  .overview-grid,
+  .overview-metrics,
   .prompt-meta,
   .stat-grid,
   .actions {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .overview-grid .settings-box:first-child {
+    grid-column: span 1;
   }
 }

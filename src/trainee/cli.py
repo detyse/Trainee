@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import webbrowser
@@ -257,7 +258,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         host = getattr(args, "host", "127.0.0.1")
         port = getattr(args, "port", 8000)
         reload = getattr(args, "reload", False)
-        run_web_service(host=host, port=port, reload=reload)
+        project_root = getattr(args, "project_root", None)
+        try:
+            run_web_service(host=host, port=port, reload=reload, project_root=project_root)
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         return 0
 
     if command == "version":
@@ -270,7 +276,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         port = getattr(args, "port", 8000)
         reload = getattr(args, "reload", False)
         open_browser = not getattr(args, "no_open", False)
-        run_web_service(host=host, port=port, reload=reload, open_browser=open_browser)
+        try:
+            run_web_service(
+                host=host,
+                port=port,
+                reload=reload,
+                open_browser=open_browser,
+                project_root=getattr(args, "project_root", None),
+            )
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         return 0
 
     if command == "tools":
@@ -382,10 +398,37 @@ def build_tool_manifest(tool_name: str | None = None, base_url: str = DEFAULT_BA
     }
 
 
-def run_web_service(host: str = "127.0.0.1", port: int = 8000, reload: bool = False, open_browser: bool = False) -> None:
-    if open_browser:
-        webbrowser.open(_webui_url(host, port))
-    uvicorn.run("trainee.app:app", host=host, port=port, reload=reload)
+def run_web_service(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    reload: bool = False,
+    open_browser: bool = False,
+    project_root: str | Path | None = None,
+) -> None:
+    resolved_project_root = _resolve_service_project_root(project_root)
+    previous_project_root = os.environ.get("TRAINEE_PROJECT_ROOT")
+    had_previous_project_root = "TRAINEE_PROJECT_ROOT" in os.environ
+    if resolved_project_root is not None:
+        os.environ["TRAINEE_PROJECT_ROOT"] = str(resolved_project_root)
+    try:
+        if open_browser:
+            webbrowser.open(_webui_url(host, port))
+        uvicorn.run("trainee.app:app", host=host, port=port, reload=reload)
+    finally:
+        if resolved_project_root is not None:
+            if had_previous_project_root and previous_project_root is not None:
+                os.environ["TRAINEE_PROJECT_ROOT"] = previous_project_root
+            else:
+                os.environ.pop("TRAINEE_PROJECT_ROOT", None)
+
+
+def _resolve_service_project_root(project_root: str | Path | None) -> Path | None:
+    if project_root is None:
+        return None
+    resolved = Path(project_root).expanduser().resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise ValueError(f"project root does not exist or is not a directory: {resolved}")
+    return resolved
 
 
 def load_tool_input(raw: str | None) -> dict[str, Any]:
@@ -871,12 +914,14 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     serve_parser = subparsers.add_parser("serve", help="Run the local web service.")
+    serve_parser.add_argument("project_root", nargs="?", help="Optional training project directory to bind.")
     serve_parser.add_argument("--host", default="127.0.0.1", help="Bind host.")
     serve_parser.add_argument("--port", default=8000, type=int, help="Bind port.")
     serve_parser.add_argument("--reload", action="store_true", help="Enable uvicorn reload mode.")
     serve_parser.set_defaults(command="serve")
 
     webui_parser = subparsers.add_parser("webui", help="Run the local web service and open the Web UI.")
+    webui_parser.add_argument("project_root", nargs="?", help="Optional training project directory to bind.")
     webui_parser.add_argument("--host", default="127.0.0.1", help="Bind host.")
     webui_parser.add_argument("--port", default=8000, type=int, help="Bind port.")
     webui_parser.add_argument("--reload", action="store_true", help="Enable uvicorn reload mode.")
