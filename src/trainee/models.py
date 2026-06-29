@@ -18,6 +18,7 @@ MetricSource = Literal["log_regex", "stdout_regex", "log_file_regex", "jsonl", "
 MetricGoal = Literal["min", "max"]
 DecisionAction = Literal["continue", "stop"]
 SecurityMode = Literal["guarded", "unsafe"]
+VisualSelection = Literal["newest"]
 
 
 class TunableParam(BaseModel):
@@ -127,6 +128,27 @@ class OutputConfig(BaseModel):
         return normalized
 
 
+class VisualsConfig(BaseModel):
+    enabled: bool = False
+    patterns: List[str] = Field(
+        default_factory=lambda: [
+            "{round_output_dir}/**/*.png",
+            "{round_dir}/outputs/**/*.png",
+        ]
+    )
+    max_images_per_round: int = Field(default=3, ge=1)
+    selection: VisualSelection = "newest"
+    prompt: str = "Analyze these as training diagnostic plots."
+
+    @field_validator("patterns")
+    @classmethod
+    def validate_patterns(cls, value: List[str]) -> List[str]:
+        patterns = [item.strip() for item in value if item.strip()]
+        if not patterns:
+            raise ValueError("visuals.patterns cannot be empty")
+        return patterns
+
+
 class MetricSpec(BaseModel):
     name: str
     source: MetricSource = "log_regex"
@@ -186,6 +208,7 @@ class ProjectSpec(BaseModel):
     tunable_params: List[TunableParam] = Field(default_factory=list)
     baseline_config_path: Optional[str] = None
     output: Optional[OutputConfig] = None
+    visuals: VisualsConfig = Field(default_factory=VisualsConfig)
     metric_specs: List[MetricSpec] = Field(default_factory=list)
     metric_prompt: str = ""
     tuning_prompt: str = ""
@@ -350,6 +373,28 @@ class AgentTrace(BaseModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class VisualPlotObservation(BaseModel):
+    path: str
+    likely_meaning: str = ""
+    visible_signals: List[str] = Field(default_factory=list)
+    concerns: List[str] = Field(default_factory=list)
+    decision_relevant_observations: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    raw_response: Optional[str] = None
+    error: Optional[str] = None
+
+
+class VisualAnalysisResult(BaseModel):
+    status: str
+    image_paths: List[str] = Field(default_factory=list)
+    plots: List[VisualPlotObservation] = Field(default_factory=list)
+    overall_visual_summary: str = ""
+    decision_relevant_observations: List[str] = Field(default_factory=list)
+    image_analysis_usage: List[Dict[str, int]] = Field(default_factory=list)
+    error: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now)
+
+
 class RunSession(BaseModel):
     id: Optional[int] = None
     status: str = "running"
@@ -377,6 +422,7 @@ class RoundRecord(BaseModel):
     log_paths: List[str] = Field(default_factory=list)
     wandb_run_url: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
+    visual_observations: Optional[VisualAnalysisResult] = None
     agent_decision: Optional[AgentDecision] = None
     agent_trace: Optional[AgentTrace] = None
     prompt_preview: Optional[PromptPreview] = None

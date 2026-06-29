@@ -19,7 +19,7 @@ from starlette.datastructures import FormData
 
 from trainee.events import EventBus
 from trainee.logging import configure_logging, get_logger
-from trainee.models import OutputConfig, ProjectContext, PromptPreset
+from trainee.models import OutputConfig, ProjectContext, PromptPreset, VisualsConfig
 from trainee.orchestrator import RuntimeService
 from trainee.provider_probe import probe_provider
 from trainee.project_config import (
@@ -892,6 +892,7 @@ def _project_config_from_form(form: FormData) -> tuple[Path, ProjectConfig]:
             fixed_args=_parse_arg_lines(_form_str(form, "fixed_args_lines")),
         ),
         output=OutputConfig(config_path=_form_str(form, "output_config_path") or None),
+        visuals=VisualsConfig.model_validate(_parse_yaml_mapping(_form_str(form, "visuals_yaml"), "visuals_yaml")),
         tuning=TuningConfig(params=_parse_yaml_list(_form_str(form, "tunable_params_yaml"), "tunable_params_yaml")),
         metrics=MetricsConfig(
             specs=_parse_yaml_list(_form_str(form, "metric_specs_yaml"), "metric_specs_yaml"),

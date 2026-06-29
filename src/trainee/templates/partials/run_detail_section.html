@@ -29,6 +29,12 @@
       <span class="label">Metrics</span>
       <pre>{{ selected_run.metrics | tojson(indent=2) }}</pre>
     </div>
+    {% if selected_run.visual_observations %}
+      <div class="detail-block">
+        <span class="label">Visual observations</span>
+        <pre>{{ selected_visual_observations_json }}</pre>
+      </div>
+    {% endif %}
     {% if selected_run.agent_decision %}
       <div class="detail-block">
         <span class="label">Agent decision</span>

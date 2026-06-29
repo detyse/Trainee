@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from trainee.models import MetricSpec, ProjectSpec, RoundRecord
+from trainee.models import MetricSpec, ProjectSpec, RoundRecord, VisualAnalysisResult
 
 
 class ResearchRoundState(BaseModel):
@@ -21,6 +21,7 @@ class ResearchRoundState(BaseModel):
     param_diff: dict[str, dict[str, Any]] = Field(default_factory=dict)
     change_signature: str = ""
     latest_round_judgement: str = "inconclusive"
+    visual_observations: Optional[VisualAnalysisResult] = None
     error: Optional[str] = None
 
 
@@ -68,6 +69,7 @@ class ResearchStateBuilder:
                 param_diff=param_diff,
                 change_signature=signature,
                 latest_round_judgement=judgement,
+                visual_observations=record.visual_observations,
                 error=record.error,
             )
             states.append(state)

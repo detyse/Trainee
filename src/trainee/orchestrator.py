@@ -27,6 +27,7 @@ from trainee.reporter import ReportGenerator
 from trainee.research_state import ResearchStateBuilder
 from trainee.settings import Settings
 from trainee.storage import Storage
+from trainee.visuals import VisualAnalyzer
 
 logger = get_logger(__name__)
 
@@ -43,6 +44,7 @@ class RuntimeService:
         research_state_builder: Optional[ResearchStateBuilder] = None,
         prompt_document_loader: Optional[PromptDocumentLoader] = None,
         ledger_exporter: Optional[LedgerExporter] = None,
+        visual_analyzer: Optional[VisualAnalyzer] = None,
     ) -> None:
         self.settings = settings
         self.storage = storage
@@ -53,6 +55,7 @@ class RuntimeService:
         self.research_state_builder = research_state_builder or ResearchStateBuilder()
         self.prompt_document_loader = prompt_document_loader or PromptDocumentLoader()
         self.ledger_exporter = ledger_exporter or LedgerExporter(self.research_state_builder)
+        self.visual_analyzer = visual_analyzer or VisualAnalyzer(self.executor)
         self._loop_task: Optional[asyncio.Task[None]] = None
         self._active_stop_event: Optional[asyncio.Event] = None
         self._task_lock = asyncio.Lock()
@@ -214,6 +217,7 @@ class RuntimeService:
             "selected_log_excerpt": selected_log_excerpt,
             "selected_decision_json": self._pretty_json(selected_run.agent_decision.model_dump(mode="json")) if selected_run and selected_run.agent_decision else "",
             "selected_agent_trace_json": self._pretty_json(selected_run.agent_trace.model_dump(mode="json")) if selected_run and selected_run.agent_trace else "",
+            "selected_visual_observations_json": self._pretty_json(selected_run.visual_observations.model_dump(mode="json")) if selected_run and selected_run.visual_observations else "",
             "prompt_preview": prompt_preview,
             "prompt_preview_label": prompt_preview_label,
             "prompt_payload_json": self._pretty_json(prompt_preview.payload) if prompt_preview else "",
@@ -437,6 +441,18 @@ class RuntimeService:
                         round_record.error = "Missing required metrics: " + ", ".join(missing)
                     else:
                         round_record.status = "completed"
+                if round_record.status == "completed" and spec.visuals.enabled:
+                    snapshot = self.storage.get_loop_snapshot()
+                    snapshot.status = "analyzing_visuals"
+                    snapshot.message = f"Analyzing visual outputs for round {round_index}."
+                    self.storage.save_loop_snapshot(snapshot)
+                    round_record.visual_observations = await self.visual_analyzer.analyze_round(
+                        spec=spec,
+                        session_id=session_id,
+                        round_index=round_index,
+                        decision_engine=self.decision_engine,
+                        reserve_image_analysis=lambda: self.reserve_image_analysis(session_id),
+                    )
                 self.storage.update_round(round_record)
                 self._export_session_artifacts(session_id, spec)
                 await self._publish(

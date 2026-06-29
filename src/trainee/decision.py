@@ -360,6 +360,53 @@ class DecisionEngine:
             }
         raise ValueError("LLM provider is disabled")
 
+    async def analyze_image(
+        self,
+        prompt: str,
+        image: dict[str, str],
+        *,
+        system_prompt: Optional[str] = None,
+    ) -> dict[str, Any]:
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("prompt is required")
+        system = system_prompt or self._visual_analysis_system_prompt()
+
+        if self.settings.llm_provider == "openai":
+            if not self.settings.openai_api_key:
+                raise ValueError("OPENAI_API_KEY is not configured")
+            completion = await self._openai_complete(system, prompt, image=image)
+            return {
+                "provider": "openai",
+                "model": self.settings.openai_model,
+                "has_image": True,
+                "content": completion.content,
+                "usage": completion.usage,
+            }
+        if self.settings.llm_provider == "moonshot":
+            if not self.settings.moonshot_api_key:
+                raise ValueError("MOONSHOT_API_KEY is not configured")
+            completion = await self._moonshot_complete(system, prompt, image=image)
+            return {
+                "provider": "moonshot",
+                "model": self.settings.moonshot_model,
+                "has_image": True,
+                "content": completion.content,
+                "usage": completion.usage,
+            }
+        if self.settings.llm_provider == "anthropic":
+            if not self.settings.anthropic_api_key:
+                raise ValueError("ANTHROPIC_API_KEY is not configured")
+            completion = await self._anthropic_complete(system, prompt, image=image)
+            return {
+                "provider": "anthropic",
+                "model": self.settings.anthropic_model,
+                "has_image": True,
+                "content": completion.content,
+                "usage": completion.usage,
+            }
+        raise ValueError("LLM provider is disabled")
+
     def _build_prompt_preview(self, envelope: PromptEnvelope, status: str) -> PromptPreview:
         provider = self.settings.llm_provider
         model = "none"
@@ -707,6 +754,12 @@ class DecisionEngine:
 
     def _probe_system_prompt(self) -> str:
         return "You are a concise API test assistant. Answer the user's prompt directly."
+
+    def _visual_analysis_system_prompt(self) -> str:
+        return (
+            "You are a conservative visual analysis assistant for machine learning training diagnostics. "
+            "Return compact JSON only. Do not recommend parameter changes directly; summarize visual evidence."
+        )
 
     def _stop_decision(
         self,

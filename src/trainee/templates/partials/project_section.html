@@ -142,6 +142,17 @@
       </label>
     </div>
 
+    <label>
+      <span>Visuals (YAML mapping)</span>
+      <textarea name="visuals_yaml" rows="7" placeholder="enabled: true&#10;patterns:&#10;  - &quot;{round_output_dir}/**/*.png&quot;&#10;  - &quot;{round_dir}/outputs/**/*.png&quot;&#10;max_images_per_round: 3&#10;selection: newest&#10;prompt: Analyze these as training diagnostic plots.">{{ cfg.visuals | toyaml if cfg else {
+        "enabled": false,
+        "patterns": ["{round_output_dir}/**/*.png", "{round_dir}/outputs/**/*.png"],
+        "max_images_per_round": 3,
+        "selection": "newest",
+        "prompt": "Analyze these as training diagnostic plots."
+      } | toyaml }}</textarea>
+    </label>
+
     <details class="settings-box">
       <summary>Advanced runtime settings</summary>
       <div class="three-col detail-spacing">

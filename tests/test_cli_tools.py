@@ -396,7 +396,7 @@ def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.1.3\nLast updated: 2026-06-27 21:52:54 +08:00\n"
+    assert capsys.readouterr().out == "Trainee 0.1.4\nLast updated: 2026-06-29 19:38:47 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys, monkeypatch):
@@ -420,6 +420,8 @@ def test_run_command_executes_project_config_unsafe(tmp_path, capsys, monkeypatc
 
     output = capsys.readouterr().out
     assert exit_code == 0
+    assert "Round 1/1 started" in output
+    assert "Round 1/1 completed" in output
     assert "Trainee run" in output
     assert "- Security: unsafe" in output
     assert "- Status: stopped" in output

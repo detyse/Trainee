@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from trainee.models import AgentDecision, AgentTrace, LoopSnapshot, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, utc_now
+from trainee.models import AgentDecision, AgentTrace, LoopSnapshot, ProjectContext, ProjectSpec, PromptPreset, PromptPreview, RoundRecord, RunSession, VisualAnalysisResult, utc_now
 
 
 class ImageAnalysisLimitExceeded(RuntimeError):
@@ -68,6 +68,7 @@ class Storage:
                     log_paths_json TEXT NOT NULL,
                     wandb_run_url TEXT,
                     metrics_json TEXT NOT NULL,
+                    visual_observations_json TEXT,
                     agent_decision_json TEXT,
                     agent_trace_json TEXT,
                     prompt_preview_json TEXT,
@@ -78,6 +79,7 @@ class Storage:
             )
             self._ensure_column("rounds", "agent_trace_json", "TEXT")
             self._ensure_column("rounds", "prompt_preview_json", "TEXT")
+            self._ensure_column("rounds", "visual_observations_json", "TEXT")
             self._ensure_column("sessions", "resumed_from", "INTEGER")
             self._ensure_column("sessions", "project_spec_json", "TEXT")
             self._ensure_column("sessions", "project_context_json", "TEXT")
@@ -275,8 +277,8 @@ class Storage:
                 INSERT INTO rounds(
                     session_id, round_index, resolved_command, param_values_json, status, start_time,
                     end_time, exit_code, log_paths_json, wandb_run_url, metrics_json, agent_decision_json,
-                    agent_trace_json, prompt_preview_json, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    agent_trace_json, prompt_preview_json, visual_observations_json, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.session_id,
@@ -293,6 +295,7 @@ class Storage:
                     json.dumps(record.agent_decision.model_dump(mode="json")) if record.agent_decision else None,
                     json.dumps(record.agent_trace.model_dump(mode="json")) if record.agent_trace else None,
                     json.dumps(record.prompt_preview.model_dump(mode="json")) if record.prompt_preview else None,
+                    json.dumps(record.visual_observations.model_dump(mode="json")) if record.visual_observations else None,
                     record.error,
                 ),
             )
@@ -309,7 +312,7 @@ class Storage:
                 UPDATE rounds
                 SET resolved_command = ?, param_values_json = ?, status = ?, start_time = ?, end_time = ?,
                     exit_code = ?, log_paths_json = ?, wandb_run_url = ?, metrics_json = ?, agent_decision_json = ?,
-                    agent_trace_json = ?, prompt_preview_json = ?, error = ?
+                    agent_trace_json = ?, prompt_preview_json = ?, visual_observations_json = ?, error = ?
                 WHERE id = ?
                 """,
                 (
@@ -325,6 +328,7 @@ class Storage:
                     json.dumps(record.agent_decision.model_dump(mode="json")) if record.agent_decision else None,
                     json.dumps(record.agent_trace.model_dump(mode="json")) if record.agent_trace else None,
                     json.dumps(record.prompt_preview.model_dump(mode="json")) if record.prompt_preview else None,
+                    json.dumps(record.visual_observations.model_dump(mode="json")) if record.visual_observations else None,
                     record.error,
                     record.id,
                 ),
@@ -422,6 +426,7 @@ class Storage:
         decision = json.loads(row["agent_decision_json"]) if row["agent_decision_json"] else None
         agent_trace = json.loads(row["agent_trace_json"]) if row["agent_trace_json"] else None
         prompt_preview = json.loads(row["prompt_preview_json"]) if row["prompt_preview_json"] else None
+        visual_observations = json.loads(row["visual_observations_json"]) if row["visual_observations_json"] else None
         return RoundRecord(
             id=row["id"],
             session_id=row["session_id"],
@@ -435,6 +440,7 @@ class Storage:
             log_paths=json.loads(row["log_paths_json"]),
             wandb_run_url=row["wandb_run_url"],
             metrics=json.loads(row["metrics_json"]),
+            visual_observations=VisualAnalysisResult.model_validate(visual_observations) if visual_observations else None,
             agent_decision=AgentDecision.model_validate(decision) if decision else None,
             agent_trace=AgentTrace.model_validate(agent_trace) if agent_trace else None,
             prompt_preview=PromptPreview.model_validate(prompt_preview) if prompt_preview else None,

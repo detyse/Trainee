@@ -12,7 +12,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from trainee.config_paths import get_config_value
-from trainee.models import MetricSpec, OutputConfig, ProjectSpec, SecurityMode, SignalSource, TunableParam
+from trainee.models import MetricSpec, OutputConfig, ProjectSpec, SecurityMode, SignalSource, TunableParam, VisualsConfig
 
 
 LaunchEnvironment = Literal["system", "uv", "venv", "conda"]
@@ -113,6 +113,7 @@ class ProjectConfig(BaseModel):
     run: RunConfig = Field(default_factory=RunConfig)
     tuning: TuningConfig = Field(default_factory=TuningConfig)
     output: Optional[OutputConfig] = None
+    visuals: VisualsConfig = Field(default_factory=VisualsConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
 
@@ -290,7 +291,7 @@ def render_project_config_yaml(config: ProjectConfig) -> str:
         if key in payload:
             ordered_payload[key] = payload[key]
     ordered_payload["output"] = output_payload
-    for key in ("metrics", "advanced"):
+    for key in ("visuals", "metrics", "advanced"):
         if key in payload:
             ordered_payload[key] = payload[key]
     for key, value in payload.items():
@@ -358,6 +359,7 @@ def compile_project_spec(
         tunable_params=tunable_params,
         baseline_config_path=baseline_config_path,
         output=output,
+        visuals=config.visuals,
         metric_specs=config.metrics.specs,
         metric_prompt=config.metrics.prompt,
         tuning_prompt=config.advanced.tuning_prompt,

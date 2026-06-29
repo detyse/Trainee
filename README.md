@@ -1,5 +1,7 @@
 # Trainee
 
+[中文说明](docs/README.zh-CN.md)
+
 <img width="256" height="256" alt="ChatGPT Image Jun 25, 2026, 01_44_14 PM" src="https://github.com/user-attachments/assets/51a0b054-5081-4862-8d38-d3601fd3d699" />
 
 Trainee is a conservative agent runtime for automating external model-training loops.

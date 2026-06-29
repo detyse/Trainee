@@ -37,6 +37,13 @@ class PromptAssembler:
             "metric_specs": [item.model_dump(mode="json") for item in spec.metric_specs],
             "metric_prompt": spec.metric_prompt,
             "tuning_prompt": spec.tuning_prompt,
+            "visuals": spec.visuals.model_dump(mode="json"),
+            "visual_observations_guidance": (
+                "If research_state rounds include visual_observations, treat them as auxiliary evidence from "
+                "recent plot images. Prefer numeric metrics when they conflict with visual interpretation. "
+                "Use visual evidence for plateaus, instability, overfitting, qualitative regressions, or failed plots. "
+                "Do not infer exact metric values from plots unless labels clearly show them."
+            ),
             "prompt_documents": [item.model_dump(mode="json") for item in documents],
             "prompt_document_manifest": [
                 {

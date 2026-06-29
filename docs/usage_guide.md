@@ -141,6 +141,21 @@ output:
 
 Trainee 每轮会把该字段改成当前 round 的内部输出目录；这个目录值不需要在 `project.yaml` 里另配。
 
+如果训练会输出诊断图，可以在 `.trainee/project.yaml` 中开启视觉摘要：
+
+```yaml
+visuals:
+  enabled: true
+  patterns:
+    - "{round_output_dir}/**/*.png"
+    - "{round_dir}/outputs/**/*.png"
+  max_images_per_round: 3
+  selection: newest
+  prompt: "Analyze these as training diagnostic plots."
+```
+
+Trainee 会在每轮完成后按 `selection: newest` 选择最近的图片，先让 vision LLM 生成短摘要，再把 `visual_observations` 放进下一次 decision prompt。图片摘要只是辅助证据；数值 metrics 与图片解释冲突时，decision prompt 会要求优先相信 metrics。图片分析次数仍受每个 session 的 image analysis limit 限制。
+
 ## 使用案例：conda ANSR 环境
 
 如果训练项目需要在 conda 的 `ANSR` 环境中运行，`.trainee/project.yaml` 里应在 `launch` 下这样写：

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from trainee.decision import DecisionResult
 from trainee.ledger import LedgerExporter
-from trainee.models import AgentDecision, MetricSpec, ProjectContext, ProjectSpec, RoundRecord, RunSession, TunableParam
+from trainee.models import AgentDecision, MetricSpec, ProjectContext, ProjectSpec, RoundRecord, RunSession, TunableParam, VisualAnalysisResult
 from trainee.prompt_assembler import PromptAssembler
 from trainee.prompt_documents import PromptDocumentLoader
 from trainee.reporter import ReportGenerator
@@ -49,6 +49,43 @@ def test_prompt_assembler_keeps_static_before_dynamic(tmp_path: Path) -> None:
     assert first.static_context_json == second.static_context_json
     assert first.dynamic_state_json["current_params"] == {"lr": 0.2}
     assert second.dynamic_state_json["current_params"] == {"lr": 0.1}
+
+
+def test_prompt_assembler_includes_visual_observations(tmp_path: Path) -> None:
+    spec_payload = _spec(tmp_path).model_dump(mode="python")
+    spec_payload["visuals"] = {
+        "enabled": True,
+        "patterns": ["{round_output_dir}/**/*.png"],
+        "max_images_per_round": 3,
+        "selection": "newest",
+        "prompt": "Analyze these as training diagnostic plots.",
+    }
+    spec = ProjectSpec.model_validate(spec_payload)
+    rounds = [
+        RoundRecord(
+            id=1,
+            session_id=1,
+            round_index=1,
+            resolved_command="train",
+            param_values={"lr": 0.2},
+            status="completed",
+            metrics={"total_loss": 1.0},
+            visual_observations=VisualAnalysisResult(
+                status="completed",
+                image_paths=["plots/loss.png"],
+                overall_visual_summary="loss.png: validation loss plateau",
+                decision_relevant_observations=["validation is no longer improving"],
+            ),
+        )
+    ]
+    state = ResearchStateBuilder().build(spec, rounds)
+    envelope = PromptAssembler().assemble(spec, ProjectContext(), state, {"lr": 0.2}, [], "system")
+
+    assert envelope.static_context_json["visuals"]["enabled"] is True
+    assert "auxiliary evidence" in envelope.static_context_json["visual_observations_guidance"]
+    latest = envelope.dynamic_state_json["research_state"]["latest_round"]
+    assert latest["visual_observations"]["overall_visual_summary"] == "loss.png: validation loss plateau"
+    assert latest["visual_observations"]["decision_relevant_observations"] == ["validation is no longer improving"]
 
 
 def test_research_state_tracks_baseline_and_best(tmp_path: Path) -> None:

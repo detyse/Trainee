@@ -35,6 +35,7 @@ class ReportGenerator:
             self._session_summary(session, rounds, state.best_so_far_round, state.primary_metric_name),
             self._params_table(rounds),
             self._metrics_table(rounds, ledger_rows, state.primary_metric_name, state.best_so_far_round),
+            self._visual_observations(rounds),
             self._decision_log(rounds),
             self._final_conclusion(session.project_spec, state.primary_metric_name, state.best_so_far_round),
         ]
@@ -117,6 +118,30 @@ class ReportGenerator:
                 )
             )
         return "## Metric Trend\n\n" + "\n".join(lines)
+
+    def _visual_observations(self, rounds: list[RoundRecord]) -> str:
+        rows = [item for item in rounds if item.visual_observations is not None]
+        if not rows:
+            return ""
+        lines = [
+            self._markdown_row(["Round", "Status", "Images", "Summary", "Observations"]),
+            self._markdown_separator(5),
+        ]
+        for item in rows:
+            visual = item.visual_observations
+            assert visual is not None
+            lines.append(
+                self._markdown_row(
+                    [
+                        item.round_index,
+                        visual.status,
+                        len(visual.image_paths),
+                        visual.overall_visual_summary,
+                        "; ".join(visual.decision_relevant_observations),
+                    ]
+                )
+            )
+        return "## Visual Observations\n\n" + "\n".join(lines)
 
     def _decision_log(self, rounds: list[RoundRecord]) -> str:
         rows = [item for item in rounds if item.agent_decision is not None]

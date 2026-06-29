@@ -4,10 +4,11 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -18,7 +19,7 @@ from trainee import __updated_at__, __version__
 from trainee.context_builder import ContextBuilder
 from trainee.doctor import format_doctor_report, run_doctor
 from trainee.events import EventBus
-from trainee.models import ProjectContext, PromptPreset
+from trainee.models import EventMessage, ProjectContext, PromptPreset
 from trainee.orchestrator import RuntimeService
 from trainee.output_discovery import OutputDiscoveryEngine, OutputDiscoveryResult
 from trainee.provider_probe import ProviderProbeResult, probe_provider
@@ -47,6 +48,7 @@ from trainee.tunable_discovery import (
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+RunProgressReporter = Callable[[EventMessage], None]
 
 
 @dataclass(frozen=True)
@@ -314,7 +316,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report = run_doctor(Path(args.project_root), security_mode=security_mode)
                 print(format_doctor_report(report), end="")
                 return 1 if report.has_failures else 0
-            result = asyncio.run(run_project(Path(args.project_root), security_mode=security_mode))
+            result = asyncio.run(
+                run_project(
+                    Path(args.project_root),
+                    security_mode=security_mode,
+                    progress_reporter=_RunProgressPrinter(),
+                )
+            )
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -629,7 +637,140 @@ def prepare_project(project_root: Path, *, replace: bool = False, skip_provider_
     return asyncio.run(prepare_project_async(project_root, replace=replace, skip_provider_test=skip_provider_test))
 
 
-async def run_project(project_root: Path, security_mode: str | None = None) -> dict[str, Any]:
+class _RunProgressPrinter:
+    def __init__(self, max_rounds: int | None = None, heartbeat_interval_sec: float = 30.0) -> None:
+        self.max_rounds = max_rounds
+        self.heartbeat_interval_sec = heartbeat_interval_sec
+        self._last_heartbeat_by_round: dict[int, float] = {}
+
+    def set_max_rounds(self, max_rounds: int) -> None:
+        self.max_rounds = max_rounds
+
+    def __call__(self, event: EventMessage) -> None:
+        if event.event_type == "loop_started":
+            self._print_loop_started(event.payload)
+        elif event.event_type == "round_started":
+            self._print_round_started(event.payload)
+        elif event.event_type == "heartbeat":
+            self._print_heartbeat(event.payload)
+        elif event.event_type == "round_finished":
+            self._print_round_finished(event.payload)
+        elif event.event_type == "decision_made":
+            self._print_decision(event.payload)
+        elif event.event_type == "loop_finished":
+            self._print_loop_finished(event.payload)
+
+    def _print_loop_started(self, payload: Mapping[str, Any]) -> None:
+        session_id = payload.get("session_id", "?")
+        line = f"Session {session_id} started"
+        if self.max_rounds is not None:
+            line += f"; max_rounds={self.max_rounds}"
+        print(line, flush=True)
+
+    def _print_round_started(self, payload: Mapping[str, Any]) -> None:
+        round_index = self._round_index(payload)
+        round_id = payload.get("round_id")
+        line = f"{self._round_label(round_index)} started"
+        if round_id is not None:
+            line += f" (#{round_id})"
+        print(line, flush=True)
+
+    def _print_heartbeat(self, payload: Mapping[str, Any]) -> None:
+        round_index = self._round_index(payload)
+        now = time.monotonic()
+        previous = self._last_heartbeat_by_round.get(round_index)
+        if previous is not None and now - previous < self.heartbeat_interval_sec:
+            return
+        self._last_heartbeat_by_round[round_index] = now
+
+        last_signal_at = payload.get("last_signal_at")
+        round_dir = payload.get("round_dir")
+        line = f"{self._round_label(round_index)} running"
+        if last_signal_at:
+            line += f"; last_signal_at={last_signal_at}"
+        elif round_dir:
+            line += f"; workspace={round_dir}"
+        print(line, flush=True)
+
+    def _print_round_finished(self, payload: Mapping[str, Any]) -> None:
+        round_index = self._round_index(payload)
+        status = payload.get("status", "finished")
+        line = f"{self._round_label(round_index)} {status}"
+        metrics = payload.get("metrics")
+        if isinstance(metrics, Mapping) and metrics:
+            line += f"; metrics: {self._format_metrics(metrics)}"
+        print(line, flush=True)
+
+    def _print_decision(self, payload: Mapping[str, Any]) -> None:
+        action = payload.get("action", "unknown")
+        reason = str(payload.get("reason") or "").strip()
+        line = f"Decision: {action}"
+        if reason:
+            line += f" - {self._truncate(reason)}"
+        print(line, flush=True)
+
+    def _print_loop_finished(self, payload: Mapping[str, Any]) -> None:
+        status = payload.get("status", "finished")
+        message = str(payload.get("message") or "").strip()
+        line = f"Run finished: {status}"
+        if message:
+            line += f" - {self._truncate(message)}"
+        print(line, flush=True)
+
+    def _round_label(self, round_index: int) -> str:
+        if self.max_rounds is None:
+            return f"Round {round_index}"
+        return f"Round {round_index}/{self.max_rounds}"
+
+    def _round_index(self, payload: Mapping[str, Any]) -> int:
+        try:
+            return int(payload.get("round_index") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _format_metrics(self, metrics: Mapping[str, Any]) -> str:
+        rendered = [
+            f"{name}={self._format_metric_value(value)}"
+            for name, value in list(metrics.items())[:3]
+        ]
+        if len(metrics) > 3:
+            rendered.append("...")
+        return ", ".join(rendered)
+
+    def _format_metric_value(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return str(value).lower()
+        if isinstance(value, (int, float)):
+            return f"{value:g}"
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    def _truncate(self, value: str, max_length: int = 180) -> str:
+        if len(value) <= max_length:
+            return value
+        return value[: max_length - 3].rstrip() + "..."
+
+
+async def _drain_progress_events(
+    queue: asyncio.Queue[EventMessage] | None,
+    progress_reporter: RunProgressReporter | None,
+) -> None:
+    if queue is None or progress_reporter is None:
+        return
+    while True:
+        try:
+            event = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        progress_reporter(event)
+
+
+async def run_project(
+    project_root: Path,
+    security_mode: str | None = None,
+    progress_reporter: RunProgressReporter | None = None,
+) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     provider_test = await _require_provider_ready(project_root)
     report = run_doctor(project_root, security_mode=security_mode, provider_test_result=provider_test)
@@ -639,13 +780,20 @@ async def run_project(project_root: Path, security_mode: str | None = None) -> d
 
     settings = load_settings(repo_root=project_root, project_root=project_root)
     storage = Storage(settings.database_path)
-    runtime = RuntimeService(settings, storage, EventBus())
+    event_bus = EventBus()
+    runtime = RuntimeService(settings, storage, event_bus)
+    progress_queue = await event_bus.subscribe() if progress_reporter is not None else None
+    if isinstance(progress_reporter, _RunProgressPrinter):
+        progress_reporter.set_max_rounds(spec.max_rounds)
     try:
         await runtime.register_project(spec)
         snapshot = await runtime.start_loop()
+        await _drain_progress_events(progress_queue, progress_reporter)
         while runtime.loop_is_running():
             await asyncio.sleep(0.2)
             snapshot = storage.get_loop_snapshot()
+            await _drain_progress_events(progress_queue, progress_reporter)
+        await _drain_progress_events(progress_queue, progress_reporter)
         session = storage.get_latest_session()
         return {
             "project_root": project_root,
@@ -657,6 +805,8 @@ async def run_project(project_root: Path, security_mode: str | None = None) -> d
             "security_mode": spec.security_mode,
         }
     finally:
+        if progress_queue is not None:
+            await event_bus.unsubscribe(progress_queue)
         storage.close()
 
 
