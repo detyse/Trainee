@@ -21,6 +21,7 @@ from trainee.events import EventBus
 from trainee.logging import configure_logging, get_logger
 from trainee.models import OutputConfig, ProjectContext, PromptPreset
 from trainee.orchestrator import RuntimeService
+from trainee.provider_probe import probe_provider
 from trainee.project_config import (
     AdvancedConfig,
     CommandArg,
@@ -321,6 +322,12 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             status_code = 409 if runtime.loop_is_running() else 400
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return JSONResponse(provider_settings_payload(updated_settings))
+
+    @app.post("/api/runtime/provider/test")
+    async def api_test_provider_settings(request: Request) -> JSONResponse:
+        runtime = get_runtime(request)
+        result = await probe_provider(runtime.settings)
+        return JSONResponse(result.model_dump(mode="json"))
 
     @app.get("/api/runtime/debug")
     async def api_get_agent_debug_settings(request: Request) -> JSONResponse:
@@ -765,6 +772,8 @@ def _health_payload(request: Request) -> Dict[str, Any]:
         "loop_state": snapshot.status,
         "current_round": snapshot.current_round_index,
         "llm_provider": runtime.settings.llm_provider,
+        "provider_health": "not_checked",
+        "provider_health_detail": "Runtime health does not test LLM provider authentication; use /api/runtime/provider/test.",
         "db_ok": db_ok,
     }
 

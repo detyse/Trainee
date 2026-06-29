@@ -8,6 +8,7 @@ import yaml
 from trainee.cli import init_project, main
 from trainee.executor import TrainingExecutor
 from trainee.models import LoopSnapshot, ProjectContext, ProjectSpec
+from trainee.provider_probe import ProviderProbeResult
 from trainee.project_config import (
     CommandArg,
     DataInput,
@@ -338,12 +339,17 @@ def test_baseline_config_must_exist_inside_project(tmp_path: Path) -> None:
             raise AssertionError(f"expected invalid baseline config: {value}")
 
 
-def test_dry_run_does_not_create_runtime_database(tmp_path: Path, capsys) -> None:
+def test_dry_run_does_not_create_runtime_database(tmp_path: Path, capsys, monkeypatch) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "data").mkdir()
     (project / "train.py").write_text("print('total_loss=1')\n", encoding="utf-8")
-    init_project(project)
+    init_project(project, skip_provider_test=True)
+
+    async def fake_probe(settings):
+        return ProviderProbeResult(provider="openai", model="test", ok=True, status="success")
+
+    monkeypatch.setattr("trainee.doctor.probe_provider", fake_probe)
 
     exit_code = main(["run", str(project), "--unsafe", "--dry-run"])
 
@@ -352,11 +358,17 @@ def test_dry_run_does_not_create_runtime_database(tmp_path: Path, capsys) -> Non
     assert not (project / ".trainee" / "runtime.sqlite3").exists()
 
 
-def test_failed_preflight_does_not_create_runtime_database(tmp_path: Path, capsys) -> None:
+def test_failed_preflight_does_not_create_runtime_database(tmp_path: Path, capsys, monkeypatch) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "train.py").write_text("print('total_loss=1')\n", encoding="utf-8")
-    init_project(project)
+    init_project(project, skip_provider_test=True)
+
+    async def fake_probe(settings):
+        return ProviderProbeResult(provider="openai", model="test", ok=True, status="success")
+
+    monkeypatch.setattr("trainee.cli.probe_provider", fake_probe)
+    monkeypatch.setattr("trainee.doctor.probe_provider", fake_probe)
 
     exit_code = main(["run", str(project), "--unsafe"])
 

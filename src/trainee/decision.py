@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from trainee.models import AgentDecision, AgentTrace, ProjectContext, ProjectSpec, PromptPreview
 from trainee.prompt_assembler import PromptAssembler, PromptEnvelope
 from trainee.prompt_documents import PromptDocument
+from trainee.providers import configured_provider_order, provider_model, settings_for_provider
 from trainee.research_state import ResearchRoundState, ResearchState
 from trainee.settings import Settings
 
@@ -113,34 +114,79 @@ class DecisionEngine:
             system_prompt=self.settings.system_prompt,
         )
         prompt_preview = self._build_prompt_preview(envelope, status="not_sent")
-        agent_trace: Optional[AgentTrace] = None
+        attempts: list[dict[str, Any]] = []
+        providers = configured_provider_order(self.settings)
+        if not providers:
+            reason = "No configured LLM provider is available; stopping instead of using heuristic fallback."
+            agent_trace = self._new_trace(
+                status="not_called",
+                fallback_reason=reason,
+                provider_error=reason,
+                force=True,
+            )
+            return DecisionResult(
+                decision=self._stop_decision(spec, research_state, current_params, reason, confidence=0.0),
+                prompt_preview=prompt_preview.model_copy(update={"status": "not_called"}),
+                agent_trace=agent_trace,
+            )
 
-        if self._provider_is_configured():
-            prompt_preview = self._build_prompt_preview(envelope, status="sent")
+        last_trace: Optional[AgentTrace] = None
+        for provider in providers:
+            provider_settings = settings_for_provider(self.settings, provider)
+            provider_engine = self if provider == self.settings.llm_provider else DecisionEngine(provider_settings, self.prompt_assembler)
+            prompt_preview = provider_engine._build_prompt_preview(envelope, status="sent")
             try:
-                completion = await self._provider_complete(envelope.system_prompt, envelope.user_prompt)
+                completion = await provider_engine._provider_complete(envelope.system_prompt, envelope.user_prompt)
             except ProviderCallError as exc:
-                agent_trace = self._new_trace(
+                attempt = self._provider_attempt(provider, provider_settings, exc.status, str(exc), exc.http_status, exc.request_id)
+                attempts.append(attempt)
+                last_trace = self._new_trace(
+                    provider=provider,
+                    model=provider_model(provider_settings, provider),
                     status=exc.status,
+                    attempts=attempts,
                     http_status=exc.http_status,
                     request_id=exc.request_id,
                     raw_response_body=exc.raw_response_body,
                     error_body=exc.error_body,
                     provider_error=str(exc),
                     fallback_reason=str(exc),
+                    force=True,
                 )
                 prompt_preview = prompt_preview.model_copy(update={"status": exc.status})
+                continue
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
-                agent_trace = self._new_trace(
+                attempt = self._provider_attempt(provider, provider_settings, "response_failed", message)
+                attempts.append(attempt)
+                last_trace = self._new_trace(
+                    provider=provider,
+                    model=provider_model(provider_settings, provider),
                     status="response_failed",
+                    attempts=attempts,
                     provider_error=message,
                     fallback_reason=message,
+                    force=True,
                 )
                 prompt_preview = prompt_preview.model_copy(update={"status": "response_failed"})
-            else:
+                continue
+
+            attempt = self._provider_attempt(
+                provider,
+                provider_settings,
+                "success",
+                "",
+                completion.http_status,
+                completion.request_id,
+            )
+            attempts.append(attempt | {"ok": True})
+            has_failed_attempt = any(not attempt.get("ok") for attempt in attempts)
+            if self.settings.agent_debug_enabled:
                 agent_trace = self._new_trace(
+                    provider=provider,
+                    model=provider_model(provider_settings, provider),
                     status="success",
+                    attempts=attempts,
                     http_status=completion.http_status,
                     request_id=completion.request_id,
                     raw_response_body=completion.raw_response_body,
@@ -148,51 +194,113 @@ class DecisionEngine:
                     usage=completion.usage,
                     finish_reason=completion.finish_reason,
                 )
-                try:
-                    candidate = self._extract_json(completion.content)
-                except (ValueError, json.JSONDecodeError) as exc:
-                    message = f"{type(exc).__name__}: {exc}"
-                    if agent_trace is not None:
-                        agent_trace.status = "parse_failed"
-                        agent_trace.parse_error = message
-                        agent_trace.fallback_reason = message
-                    prompt_preview = prompt_preview.model_copy(update={"status": "parse_failed"})
+            elif has_failed_attempt:
+                agent_trace = self._new_trace(
+                    provider=provider,
+                    model=provider_model(provider_settings, provider),
+                    status="success",
+                    attempts=attempts,
+                    http_status=completion.http_status,
+                    request_id=completion.request_id,
+                    force=True,
+                )
+            else:
+                agent_trace = None
+            try:
+                candidate = self._extract_json(completion.content)
+            except (ValueError, json.JSONDecodeError) as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                if agent_trace is not None:
+                    agent_trace.status = "parse_failed"
+                    agent_trace.parse_error = message
+                    agent_trace.fallback_reason = message
                 else:
-                    if agent_trace is not None:
-                        agent_trace.extracted_json = candidate
-                    try:
-                        decision = AgentDecision.model_validate(candidate)
-                    except ValidationError as exc:
-                        message = str(exc)
-                        if agent_trace is not None:
-                            agent_trace.status = "validation_failed"
-                            agent_trace.validation_error = message
-                            agent_trace.fallback_reason = message
-                        prompt_preview = prompt_preview.model_copy(update={"status": "validation_failed"})
-                    else:
-                        try:
-                            decision.next_params = spec.merge_param_values(decision.next_params, base=current_params)
-                        except ValueError as exc:
-                            message = f"tunable parameter validation failed: {exc}"
-                            if agent_trace is not None:
-                                agent_trace.status = "validation_failed"
-                                agent_trace.validation_error = message
-                                agent_trace.fallback_reason = message
-                            prompt_preview = prompt_preview.model_copy(update={"status": "validation_failed"})
-                        else:
-                            return DecisionResult(
-                                decision=decision,
-                                prompt_preview=prompt_preview,
-                                agent_trace=agent_trace,
-                            )
-        else:
-            reason = self._provider_unavailable_reason()
-            agent_trace = self._new_trace(status="not_called", fallback_reason=reason)
+                    agent_trace = self._new_trace(
+                        provider=provider,
+                        model=provider_model(provider_settings, provider),
+                        status="parse_failed",
+                        attempts=attempts,
+                        parse_error=message,
+                        fallback_reason=message,
+                        force=True,
+                    )
+                prompt_preview = prompt_preview.model_copy(update={"status": "parse_failed"})
+                reason = f"LLM decision response could not be parsed; stopping instead of using heuristic fallback: {message}"
+                return DecisionResult(
+                    decision=self._stop_decision(spec, research_state, current_params, reason, confidence=0.0),
+                    prompt_preview=prompt_preview,
+                    agent_trace=agent_trace,
+                )
 
+            if agent_trace is not None:
+                agent_trace.extracted_json = candidate
+            try:
+                decision = AgentDecision.model_validate(candidate)
+            except ValidationError as exc:
+                message = str(exc)
+                if agent_trace is not None:
+                    agent_trace.status = "validation_failed"
+                    agent_trace.validation_error = message
+                    agent_trace.fallback_reason = message
+                else:
+                    agent_trace = self._new_trace(
+                        provider=provider,
+                        model=provider_model(provider_settings, provider),
+                        status="validation_failed",
+                        attempts=attempts,
+                        validation_error=message,
+                        fallback_reason=message,
+                        force=True,
+                    )
+                prompt_preview = prompt_preview.model_copy(update={"status": "validation_failed"})
+                reason = f"LLM decision response failed validation; stopping instead of using heuristic fallback: {message}"
+                return DecisionResult(
+                    decision=self._stop_decision(spec, research_state, current_params, reason, confidence=0.0),
+                    prompt_preview=prompt_preview,
+                    agent_trace=agent_trace,
+                )
+
+            try:
+                decision.next_params = spec.merge_param_values(decision.next_params, base=current_params)
+            except ValueError as exc:
+                message = f"tunable parameter validation failed: {exc}"
+                if agent_trace is not None:
+                    agent_trace.status = "validation_failed"
+                    agent_trace.validation_error = message
+                    agent_trace.fallback_reason = message
+                else:
+                    agent_trace = self._new_trace(
+                        provider=provider,
+                        model=provider_model(provider_settings, provider),
+                        status="validation_failed",
+                        attempts=attempts,
+                        validation_error=message,
+                        fallback_reason=message,
+                        force=True,
+                    )
+                prompt_preview = prompt_preview.model_copy(update={"status": "validation_failed"})
+                reason = f"LLM decision proposed invalid tunable params; stopping instead of using heuristic fallback: {message}"
+                return DecisionResult(
+                    decision=self._stop_decision(spec, research_state, current_params, reason, confidence=0.0),
+                    prompt_preview=prompt_preview,
+                    agent_trace=agent_trace,
+                )
+
+            return DecisionResult(decision=decision, prompt_preview=prompt_preview, agent_trace=agent_trace)
+
+        reason = "All configured LLM providers failed; stopping instead of using heuristic fallback."
+        if attempts:
+            reason += " " + "; ".join(
+                f"{attempt['provider']} {attempt['status']}"
+                + (f" HTTP {attempt['http_status']}" if attempt.get("http_status") is not None else "")
+                + (f": {attempt['error_message']}" if attempt.get("error_message") else "")
+                for attempt in attempts
+            )
         return DecisionResult(
-            decision=self._heuristic_decision(spec, research_state, current_params),
+            decision=self._stop_decision(spec, research_state, current_params, reason, confidence=0.0),
             prompt_preview=prompt_preview,
-            agent_trace=agent_trace,
+            agent_trace=last_trace
+            or self._new_trace(status="request_failed", attempts=attempts, provider_error=reason, fallback_reason=reason, force=True),
         )
 
     def build_prompt_preview(
@@ -303,16 +411,42 @@ class DecisionEngine:
             return self.settings.anthropic_model
         return None
 
-    def _new_trace(self, *, status: str, **updates: Any) -> Optional[AgentTrace]:
-        if not self.settings.agent_debug_enabled:
+    def _new_trace(
+        self,
+        *,
+        status: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        force: bool = False,
+        **updates: Any,
+    ) -> Optional[AgentTrace]:
+        if not force and not self.settings.agent_debug_enabled:
             return None
-        provider = self.settings.llm_provider
         return AgentTrace(
-            provider=provider,
-            model=self._provider_model(provider),
+            provider=provider or self.settings.llm_provider,
+            model=model if model is not None else self._provider_model(provider or self.settings.llm_provider),
             status=status,
             **updates,
         )
+
+    def _provider_attempt(
+        self,
+        provider: str,
+        settings: Settings,
+        status: str,
+        error_message: str = "",
+        http_status: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return {
+            "provider": provider,
+            "model": provider_model(settings, provider),
+            "ok": status == "success",
+            "status": status,
+            "http_status": http_status,
+            "request_id": request_id,
+            "error_message": error_message,
+        }
 
     async def _provider_complete(self, system_prompt: str, user_prompt: str) -> ProviderCompletion:
         if self.settings.llm_provider == "openai":
@@ -573,6 +707,28 @@ class DecisionEngine:
 
     def _probe_system_prompt(self) -> str:
         return "You are a concise API test assistant. Answer the user's prompt directly."
+
+    def _stop_decision(
+        self,
+        spec: ProjectSpec,
+        research_state: ResearchState,
+        current_params: dict[str, Any],
+        reason: str,
+        *,
+        confidence: float = 0.0,
+    ) -> AgentDecision:
+        latest = research_state.latest_round
+        return AgentDecision(
+            action="stop",
+            next_params=spec.merge_param_values(base=current_params),
+            reason=reason,
+            focus_metrics=self._focus_metrics(spec),
+            latest_round_judgement=self._latest_judgement(research_state),
+            compare_to_baseline=self._comparison_text("baseline", latest, research_state.baseline_round) if latest else "",
+            compare_to_best=self._comparison_text("best", latest, research_state.best_so_far_round) if latest else "",
+            avoid_repeating=research_state.rejected_change_signatures,
+            confidence=confidence,
+        )
 
     def _heuristic_decision(
         self,

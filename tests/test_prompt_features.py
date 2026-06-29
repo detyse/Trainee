@@ -5,6 +5,7 @@ import json
 import yaml
 
 from trainee.models import AgentTrace, RoundRecord, RunSession
+from trainee.provider_probe import ProviderProbeResult, ProviderProbeAttempt
 from trainee.settings import load_settings
 
 REGISTER_PAYLOAD_TEMPLATE = {
@@ -239,6 +240,42 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
     assert config["llm_provider"] == "moonshot"
     assert config["moonshot"]["api_key"] == "moonshot-secret"
     assert client.get("/api/health").json()["llm_provider"] == "moonshot"
+
+
+def test_runtime_provider_test_api_returns_probe_result(runtime_env, monkeypatch):
+    client = runtime_env["client"]
+
+    async def fake_probe(settings):
+        return ProviderProbeResult(
+            provider="moonshot",
+            model="kimi-test",
+            ok=False,
+            status="request_failed",
+            http_status=401,
+            error_message="Provider returned HTTP 401.",
+            error_body='{"error":"Invalid Authentication"}',
+            attempts=[
+                ProviderProbeAttempt(
+                    provider="moonshot",
+                    model="kimi-test",
+                    ok=False,
+                    status="request_failed",
+                    http_status=401,
+                    error_message="Provider returned HTTP 401.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("trainee.app.probe_provider", fake_probe)
+
+    response = client.post("/api/runtime/provider/test")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["provider"] == "moonshot"
+    assert payload["http_status"] == 401
+    assert "api_key" not in json.dumps(payload)
 
 
 def test_agent_debug_setting_defaults_off_and_persists(runtime_env):

@@ -21,6 +21,7 @@ from trainee.events import EventBus
 from trainee.models import ProjectContext, PromptPreset
 from trainee.orchestrator import RuntimeService
 from trainee.output_discovery import OutputDiscoveryEngine, OutputDiscoveryResult
+from trainee.provider_probe import ProviderProbeResult, probe_provider
 from trainee.project_config import (
     ProjectRegistration,
     compile_project_spec,
@@ -155,6 +156,13 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         input_schema=ProviderSettingsUpdate.model_json_schema(),
     ),
     ToolDefinition(
+        name="runtime_provider_test",
+        description="Send a live probe request to the configured LLM provider without exposing API keys.",
+        method="POST",
+        path="/api/runtime/provider/test",
+        input_schema=_empty_schema(),
+    ),
+    ToolDefinition(
         name="runtime_debug_get",
         description="Read whether Agent Debug trace collection is enabled.",
         method="GET",
@@ -275,6 +283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(args.project_root),
                     force=args.force,
                     baseline_config=args.baseline_config,
+                    skip_provider_test=args.skip_provider_test,
                 )
             )
         except (OSError, ValueError) as exc:
@@ -285,7 +294,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "prepare":
         try:
-            result = asyncio.run(prepare_project_async(Path(args.project_root), replace=args.replace))
+            result = asyncio.run(
+                prepare_project_async(
+                    Path(args.project_root),
+                    replace=args.replace,
+                    skip_provider_test=args.skip_provider_test,
+                )
+            )
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -307,7 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if result["status"] != "failed" else 1
 
     if command == "doctor":
-        report = run_doctor(Path(args.project_root))
+        report = run_doctor(Path(args.project_root), skip_provider_test=args.skip_provider_test)
         print(format_doctor_report(report), end="")
         return 1 if report.has_failures else 0
 
@@ -433,10 +448,13 @@ async def initialize_project(
     project_root: Path,
     force: bool = False,
     baseline_config: str | None = None,
+    skip_provider_test: bool = False,
 ) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     if not project_root.exists() or not project_root.is_dir():
         raise ValueError(f"project root does not exist or is not a directory: {project_root}")
+
+    provider_test = None if skip_provider_test else await _require_provider_ready(project_root)
 
     trainee_dir = project_root / ".trainee"
     trainee_dir.mkdir(parents=True, exist_ok=True)
@@ -489,6 +507,7 @@ async def initialize_project(
         "discovery": discovery,
         "tunable_discovery": None,
         "applied_tunables": [],
+        "provider_test": provider_test,
         "warnings": context.warnings,
     }
 
@@ -497,12 +516,14 @@ def init_project(
     project_root: Path,
     force: bool = False,
     baseline_config: str | None = None,
+    skip_provider_test: bool = False,
 ) -> dict[str, Any]:
     return asyncio.run(
         initialize_project(
             project_root,
             force=force,
             baseline_config=baseline_config,
+            skip_provider_test=skip_provider_test,
         )
     )
 
@@ -511,6 +532,7 @@ async def prepare_project_async(
     project_root: Path,
     *,
     replace: bool = False,
+    skip_provider_test: bool = False,
 ) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     config_path = project_config_path(project_root)
@@ -520,6 +542,7 @@ async def prepare_project_async(
     spec = compile_project_spec(project_root, config)
     context = ContextBuilder().build(spec)
     settings = load_settings(repo_root=project_root, project_root=project_root)
+    provider_test = None if skip_provider_test else await _require_provider_ready(project_root, settings=settings)
     output_discovery = OutputDiscoveryResult()
     if config.output is None:
         output_discovery = await OutputDiscoveryEngine(settings).suggest(spec, context)
@@ -597,17 +620,19 @@ async def prepare_project_async(
         "output_applied": output_applied,
         "tunable_discovery": tunable_discovery,
         "applied_tunables": applied_tunables,
+        "provider_test": provider_test,
         "warnings": context.warnings,
     }
 
 
-def prepare_project(project_root: Path, *, replace: bool = False) -> dict[str, Any]:
-    return asyncio.run(prepare_project_async(project_root, replace=replace))
+def prepare_project(project_root: Path, *, replace: bool = False, skip_provider_test: bool = False) -> dict[str, Any]:
+    return asyncio.run(prepare_project_async(project_root, replace=replace, skip_provider_test=skip_provider_test))
 
 
 async def run_project(project_root: Path, security_mode: str | None = None) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
-    report = run_doctor(project_root, security_mode=security_mode)
+    provider_test = await _require_provider_ready(project_root)
+    report = run_doctor(project_root, security_mode=security_mode, provider_test_result=provider_test)
     if report.has_failures:
         raise ValueError("preflight failed:\n" + format_doctor_report(report))
     spec = compile_project_spec(project_root, load_project_config(project_root), security_mode=security_mode)
@@ -633,6 +658,28 @@ async def run_project(project_root: Path, security_mode: str | None = None) -> d
         }
     finally:
         storage.close()
+
+
+async def _require_provider_ready(project_root: Path, *, settings: Any = None) -> ProviderProbeResult:
+    settings = settings or load_settings(repo_root=project_root, project_root=project_root)
+    result = await probe_provider(settings)
+    if not result.ok:
+        raise ValueError("LLM provider test failed: " + _format_provider_test_result(result))
+    return result
+
+
+def _format_provider_test_result(result: ProviderProbeResult) -> str:
+    parts = [
+        f"provider={result.provider}",
+        f"model={result.model}",
+        f"status={result.status}",
+    ]
+    if result.http_status is not None:
+        parts.append(f"http_status={result.http_status}")
+    summary = result.failure_summary()
+    if summary:
+        parts.append(summary)
+    return "; ".join(parts)
 
 
 async def discover_tunables(
@@ -696,11 +743,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--baseline-config",
         help="Initialize launch.baseline_config with a project-local training config path.",
     )
+    init_parser.add_argument(
+        "--skip-provider-test",
+        action="store_true",
+        help="Skip the live LLM provider test for offline setup.",
+    )
     init_parser.set_defaults(command="init")
 
     prepare_parser = subparsers.add_parser("prepare", help="Infer runtime output and tunable config from launch.baseline_config.")
     prepare_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
     prepare_parser.add_argument("--replace", action="store_true", help="Replace existing tuning.yaml params with fresh suggestions.")
+    prepare_parser.add_argument(
+        "--skip-provider-test",
+        action="store_true",
+        help="Skip the live LLM provider test for offline setup.",
+    )
     prepare_parser.set_defaults(command="prepare")
 
     run_parser = subparsers.add_parser("run", help="Run the training loop from .trainee/project.yaml.")
@@ -713,6 +770,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = subparsers.add_parser("doctor", help="Check whether a training project is ready for Trainee.")
     doctor_parser.add_argument("project_root", nargs="?", default=".", help="Training project directory. Defaults to the current directory.")
+    doctor_parser.add_argument(
+        "--skip-provider-test",
+        action="store_true",
+        help="Skip the live LLM provider test for offline setup.",
+    )
     doctor_parser.set_defaults(command="doctor")
 
     tunables_parser = subparsers.add_parser("tunables", help="Inspect or update tunable parameter configuration.")
@@ -852,6 +914,7 @@ def _print_init_result(result: Mapping[str, Any]) -> None:
     print(f"- Log paths: {_joined_or_none(spec.log_paths)}")
     launcher = result["launcher_template"] or "set launch.command in .trainee/project.yaml"
     print(f"- Launcher: {launcher}")
+    _print_provider_test_summary(result.get("provider_test"))
 
     print("")
     print("Next")
@@ -927,6 +990,7 @@ def _print_prepare_result(result: Mapping[str, Any]) -> None:
     print("Effective configuration")
     print(f"- Output: {spec.output.config_path + ' -> ' + spec.output.path if spec.output else 'not set'}")
     print(f"- Tunable parameters: {_format_tunable_params(spec.tunable_params)}")
+    _print_provider_test_summary(result.get("provider_test"))
 
     print("")
     print("Next")
@@ -940,6 +1004,22 @@ def _print_prepare_result(result: Mapping[str, Any]) -> None:
 def _joined_or_none(values: Sequence[Any]) -> str:
     rendered = [str(value) for value in values]
     return ", ".join(rendered) if rendered else "none"
+
+
+def _print_provider_test_summary(result: Any) -> None:
+    print("")
+    print("Provider")
+    if result is None:
+        print("- Live test: skipped")
+        return
+    print(f"- Live test: {'ok' if result.ok else 'failed'}")
+    print(f"- Provider: {result.provider}")
+    print(f"- Model: {result.model}")
+    print(f"- Status: {result.status}")
+    if result.http_status is not None:
+        print(f"- HTTP: {result.http_status}")
+    if not result.ok and result.failure_summary():
+        print(f"- Error: {result.failure_summary()}")
 
 
 def _format_command_args(values: Sequence[Any]) -> str:

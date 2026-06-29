@@ -239,9 +239,11 @@ def test_agent_trace_is_not_created_when_debug_is_disabled(tmp_path: Path, monke
 
     response_content["value"] = "not json"
     fallback_result = _run_decision(DecisionEngine(settings), spec, context, history)
-    assert fallback_result.agent_trace is None
+    assert fallback_result.agent_trace is not None
+    assert fallback_result.agent_trace.status == "parse_failed"
     assert fallback_result.prompt_preview is not None
     assert fallback_result.prompt_preview.status == "parse_failed"
+    assert fallback_result.decision.action == "stop"
 
 
 @pytest.mark.parametrize(
@@ -325,6 +327,47 @@ def test_agent_trace_records_http_error_body(tmp_path: Path, monkeypatch) -> Non
     assert result.agent_trace.provider_error == "Provider returned HTTP 429."
 
 
+def test_decision_uses_next_provider_when_primary_request_fails(tmp_path: Path, monkeypatch) -> None:
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, json, headers):
+            if "moonshot" in url:
+                return httpx.Response(401, request=httpx.Request("POST", url), json={"error": "bad key"})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"action":"continue","next_params":{"lr":0.12},"reason":"openai ok"}'
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    spec, context, history = _decision_inputs(tmp_path)
+
+    result = _run_decision(DecisionEngine(_settings(tmp_path, "moonshot")), spec, context, history)
+
+    assert result.decision.next_params["lr"] == 0.12
+    assert result.agent_trace is not None
+    assert result.agent_trace.provider == "openai"
+    assert [attempt["provider"] for attempt in result.agent_trace.attempts] == ["moonshot", "openai"]
+    assert result.agent_trace.attempts[0]["status"] == "request_failed"
+
+
 def test_agent_trace_records_transport_and_not_called_reasons(tmp_path: Path, monkeypatch) -> None:
     class FakeAsyncClient:
         def __init__(self, timeout):
@@ -345,7 +388,12 @@ def test_agent_trace_records_transport_and_not_called_reasons(tmp_path: Path, mo
 
     timeout_result = _run_decision(DecisionEngine(_settings(tmp_path, "openai")), spec, context, history)
     disabled_result = _run_decision(DecisionEngine(_settings(tmp_path, "none")), spec, context, history)
-    missing_key_settings = replace(_settings(tmp_path, "openai"), openai_api_key=None)
+    missing_key_settings = replace(
+        _settings(tmp_path, "openai"),
+        openai_api_key=None,
+        moonshot_api_key=None,
+        anthropic_api_key=None,
+    )
     missing_key_result = _run_decision(DecisionEngine(missing_key_settings), spec, context, history)
 
     assert timeout_result.agent_trace is not None
@@ -353,10 +401,10 @@ def test_agent_trace_records_transport_and_not_called_reasons(tmp_path: Path, mo
     assert "ReadTimeout" in (timeout_result.agent_trace.provider_error or "")
     assert disabled_result.agent_trace is not None
     assert disabled_result.agent_trace.status == "not_called"
-    assert disabled_result.agent_trace.fallback_reason == "LLM provider is disabled."
+    assert "No configured LLM provider" in (disabled_result.agent_trace.fallback_reason or "")
     assert missing_key_result.agent_trace is not None
     assert missing_key_result.agent_trace.status == "not_called"
-    assert "API key is not configured" in (missing_key_result.agent_trace.fallback_reason or "")
+    assert "No configured LLM provider" in (missing_key_result.agent_trace.fallback_reason or "")
 
 
 def test_agent_trace_round_trip_through_storage(tmp_path: Path) -> None:

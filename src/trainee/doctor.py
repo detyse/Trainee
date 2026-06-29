@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import asyncio
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,9 +15,10 @@ from pydantic import ValidationError
 
 from trainee.models import ProjectSpec, TunableParam
 from trainee.executor import TrainingExecutor
+from trainee.provider_probe import ProviderProbeResult, probe_provider
 from trainee.project_config import compile_project_spec, load_project_config, tuning_config_path
 from trainee.security import SANDBOX_DIRS
-from trainee.settings import Settings, load_settings
+from trainee.settings import load_settings
 
 DoctorStatus = Literal["ok", "warn", "fail"]
 
@@ -50,7 +52,13 @@ class DoctorReport:
         return any(finding.status == "fail" for section in self.sections for finding in section.findings)
 
 
-def run_doctor(project_root: Path, security_mode: str | None = None) -> DoctorReport:
+def run_doctor(
+    project_root: Path,
+    security_mode: str | None = None,
+    *,
+    skip_provider_test: bool = False,
+    provider_test_result: ProviderProbeResult | None = None,
+) -> DoctorReport:
     project_root = project_root.expanduser().resolve()
     sections: list[DoctorSection] = []
     fixes: list[str] = []
@@ -79,7 +87,7 @@ def run_doctor(project_root: Path, security_mode: str | None = None) -> DoctorRe
     sections.append(sandbox_section)
     _collect_fixes(sandbox_section, fixes)
 
-    llm_section = _check_llm(project_root)
+    llm_section = _check_llm(project_root, skip_provider_test=skip_provider_test, provider_test_result=provider_test_result)
     sections.append(llm_section)
     _collect_fixes(llm_section, fixes)
 
@@ -388,24 +396,59 @@ def _check_sandbox(project_root: Path, spec: ProjectSpec | None) -> DoctorSectio
     return section
 
 
-def _check_llm(project_root: Path) -> DoctorSection:
+def _check_llm(
+    project_root: Path,
+    *,
+    skip_provider_test: bool = False,
+    provider_test_result: ProviderProbeResult | None = None,
+) -> DoctorSection:
     section = DoctorSection("LLM")
     try:
         settings = load_settings(repo_root=project_root, project_root=project_root)
     except (OSError, ValueError) as exc:
-        section.add("warn", f"LLM config could not be read: {exc}")
+        section.add("fail", f"LLM config could not be read: {exc}")
         return section
 
     provider = settings.llm_provider
-    if provider == "none":
-        section.add("warn", "no LLM key found, will use heuristic mode")
+    if skip_provider_test:
+        section.add("warn", "LLM provider live test skipped")
         return section
 
-    if _provider_has_key(settings, provider):
-        section.add("ok", f"provider: {provider}")
+    result = provider_test_result
+    if result is None:
+        try:
+            result = asyncio.run(probe_provider(settings))
+        except RuntimeError as exc:
+            section.add("fail", f"LLM provider live test could not run: {exc}")
+            return section
+
+    if result.ok:
+        section.add("ok", f"provider live test ok: {result.provider} ({result.model})")
+        failed_attempts = [attempt for attempt in result.attempts if not attempt.ok]
+        if failed_attempts:
+            section.add("warn", "primary provider failed; fallback provider succeeded", detail=_format_provider_attempts(result))
     else:
-        section.add("warn", f"provider {provider} has no API key configured")
+        section.add(
+            "fail",
+            f"LLM provider live test failed: {result.provider} ({result.model})",
+            detail=_format_provider_attempts(result) or result.failure_summary(),
+            fix="configure a working LLM provider key or run init/prepare/doctor with --skip-provider-test only for offline setup",
+        )
     return section
+
+
+def _format_provider_attempts(result: ProviderProbeResult) -> str:
+    lines = []
+    for attempt in result.attempts:
+        line = f"{attempt.provider} ({attempt.model}): {attempt.status}"
+        if attempt.http_status is not None:
+            line += f" HTTP {attempt.http_status}"
+        if attempt.error_message:
+            line += f" - {attempt.error_message}"
+        if attempt.error_body:
+            line += f"\n{attempt.error_body}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _collect_fixes(section: DoctorSection, fixes: list[str]) -> None:
@@ -622,12 +665,3 @@ def _unbounded_tunable_params(params: Iterable[TunableParam]) -> list[str]:
             unbounded.append(param.name)
     return unbounded
 
-
-def _provider_has_key(settings: Settings, provider: str) -> bool:
-    if provider == "openai":
-        return bool(settings.openai_api_key)
-    if provider == "anthropic":
-        return bool(settings.anthropic_api_key)
-    if provider == "moonshot":
-        return bool(settings.moonshot_api_key)
-    return False

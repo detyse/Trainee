@@ -334,6 +334,7 @@ class AgentTrace(BaseModel):
     provider: str
     model: Optional[str] = None
     status: str
+    attempts: List[Dict[str, Any]] = Field(default_factory=list)
     http_status: Optional[int] = None
     request_id: Optional[str] = None
     raw_response_body: Optional[str] = None

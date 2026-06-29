@@ -6,8 +6,9 @@ import subprocess
 import pytest
 import yaml
 
+from trainee.decision import DecisionResult
 from trainee.executor import TrainingExecutor
-from trainee.models import ProjectSpec
+from trainee.models import AgentDecision, ProjectSpec
 
 REGISTER_PAYLOAD_TEMPLATE = {
     "security_mode": "unsafe",
@@ -128,6 +129,29 @@ def test_loop_runs_two_rounds_and_collects_metrics(runtime_env, wait_for):
     client = runtime_env["client"]
     external_project = runtime_env["external_project"]
     python = runtime_env["python"]
+    runtime = client.app.state.runtime
+    decisions = 0
+
+    async def fake_decide_with_prompt(**kwargs):
+        nonlocal decisions
+        decisions += 1
+        if decisions == 1:
+            decision = AgentDecision(
+                action="continue",
+                next_params={"lr": 0.16},
+                reason="test continue",
+                focus_metrics=["total_loss"],
+            )
+        else:
+            decision = AgentDecision(
+                action="stop",
+                next_params=kwargs["current_params"],
+                reason="test stop",
+                focus_metrics=["total_loss"],
+            )
+        return DecisionResult(decision=decision)
+
+    runtime.decision_engine.decide_with_prompt = fake_decide_with_prompt
 
     register_payload = REGISTER_PAYLOAD_TEMPLATE | {
         "project_root": str(external_project),

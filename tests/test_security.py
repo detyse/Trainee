@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -178,8 +179,8 @@ def test_bwrap_allows_only_trainee_writes(tmp_path: Path) -> None:
     assert (project / ".trainee" / "allowed.txt").read_text(encoding="utf-8") == "ok"
 
 
-def test_invalid_provider_params_fall_back_without_unknown_values(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
+def test_invalid_provider_params_stop_without_unknown_values(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), llm_provider="openai", openai_api_key="openai-key")
     engine = DecisionEngine(settings)
     spec = _spec(tmp_path / "project")
     context = ProjectContext(project_summary="Fake project")
@@ -199,7 +200,6 @@ def test_invalid_provider_params_fall_back_without_unknown_values(tmp_path: Path
         content = '{"action":"continue","next_params":{"unknown":"bad"},"reason":"bad"}'
         return ProviderCompletion(content=content, raw_response_body=content, http_status=200)
 
-    engine._provider_is_configured = lambda: True  # type: ignore[method-assign]
     engine._provider_complete = invalid_provider  # type: ignore[method-assign]
 
     result = asyncio.run(
@@ -212,11 +212,13 @@ def test_invalid_provider_params_fall_back_without_unknown_values(tmp_path: Path
         )
     )
 
+    assert result.decision.action == "stop"
+    assert "invalid tunable params" in result.decision.reason
     assert "unknown" not in result.decision.next_params
     assert set(result.decision.next_params) <= {"lr"}
 
 
-def test_heuristic_fallback_stops_when_no_safe_numeric_adjustment(tmp_path: Path) -> None:
+def test_decision_stops_when_no_provider_is_configured(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     engine = DecisionEngine(settings)
     project = tmp_path / "project"
@@ -261,7 +263,7 @@ def test_heuristic_fallback_stops_when_no_safe_numeric_adjustment(tmp_path: Path
     )
 
     assert result.decision.action == "stop"
-    assert "could not find a safe numeric tunable parameter" in result.decision.reason
+    assert "No configured LLM provider" in result.decision.reason
     assert result.decision.next_params == {"lr": 0.05}
 
 

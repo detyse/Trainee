@@ -25,9 +25,22 @@
       <strong>{{ "ok" if health.db_ok else "failed" }}</strong>
     </div>
     <div>
+      <span class="label">Provider live test</span>
+      <strong>not checked</strong>
+    </div>
+    <div>
       <span class="label">Agent Debug</span>
       <strong>{{ "enabled" if runtime_settings.agent_debug_enabled else "disabled" }}</strong>
     </div>
+  </div>
+
+  <div class="settings-box">
+    <div>
+      <p class="panel-kicker">Provider Live Test</p>
+      <p class="muted">Runtime health only checks the service and database. Use this to verify live LLM authentication.</p>
+    </div>
+    <button class="secondary" type="button" onclick="window.testProvider()">Test Provider</button>
+    <pre id="provider-test-output" class="agent-trace-output"></pre>
   </div>
 
   <form
@@ -40,7 +53,7 @@
   >
     <div>
       <p class="panel-kicker">Agent Debug Trace</p>
-      <p class="muted">Store complete provider responses, parsing errors, validation errors, and heuristic fallback reasons for future rounds.</p>
+      <p class="muted">Store complete provider responses, parsing errors, validation errors, and provider attempt details for future rounds.</p>
     </div>
     <label class="checkbox-row">
       <input

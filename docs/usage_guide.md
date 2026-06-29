@@ -4,7 +4,7 @@
 
 ## 项目定位
 
-Trainee 是一个用于自动化外部模型训练循环的 agent runtime。它不包含训练代码，而是连接到已有训练项目，执行项目自己的训练命令，监控训练进度，解析指标，并根据 LLM 或保守 fallback 策略决定下一轮参数。
+Trainee 是一个用于自动化外部模型训练循环的 agent runtime。它不包含训练代码，而是连接到已有训练项目，执行项目自己的训练命令，监控训练进度，解析指标，并根据已配置且可用的 LLM 决定下一轮参数。
 
 典型流程：
 
@@ -52,6 +52,8 @@ trainee init --baseline-config configs/base.yaml
 - `.trainee/context.md`: Trainee 对项目的上下文理解。
 - `.trainee/README.md`: 初始化时检测到的候选入口、配置和目录说明。
 
+`trainee init` 默认会对当前 provider 做一次 live API 测试。离线初始化时可以使用 `--skip-provider-test`，但真正运行训练循环时不能跳过 provider 检查。
+
 ## 准备与校验
 
 如果设置了 `launch.baseline_config`，可以运行：
@@ -61,6 +63,8 @@ trainee prepare
 ```
 
 `prepare` 会基于项目上下文和 baseline 配置推断输出路径与可调参数。推断结果必须人工检查后再运行训练。
+
+`trainee prepare` 同样会测试 provider；离线配置阶段可加 `--skip-provider-test`。
 
 运行前建议校验配置并查看最终命令：
 
@@ -98,6 +102,8 @@ http://127.0.0.1:8000
 ```
 
 Web UI 可用于项目设置、循环控制、prompt 预览、运行检查、provider 设置和报告查看。
+
+Web UI 的 runtime health 只表示服务和数据库健康；LLM 鉴权需要使用 Provider Settings 里的 provider live test 或 `/llm-test`。
 
 ## 配置要点
 

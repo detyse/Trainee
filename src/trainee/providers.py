@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -8,6 +9,7 @@ from trainee.settings import DEFAULT_MOONSHOT_BASE_URL, DEFAULT_MOONSHOT_MODEL, 
 
 ProviderName = Literal["none", "moonshot", "openai", "anthropic"]
 PROVIDER_NAMES: tuple[ProviderName, ...] = ("none", "moonshot", "openai", "anthropic")
+PROVIDER_FALLBACK_ORDER: tuple[LLMProvider, ...] = ("moonshot", "openai", "anthropic")
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
@@ -74,14 +76,42 @@ def active_model(settings: Settings) -> str:
     return "none"
 
 
-def provider_is_configured(settings: Settings) -> bool:
-    if settings.llm_provider == "openai":
+def provider_model(settings: Settings, provider: str) -> str:
+    if provider == "openai":
+        return settings.openai_model
+    if provider == "moonshot":
+        return settings.moonshot_model
+    if provider == "anthropic":
+        return settings.anthropic_model
+    return "none"
+
+
+def provider_has_key(settings: Settings, provider: str) -> bool:
+    if provider == "openai":
         return bool(settings.openai_api_key)
-    if settings.llm_provider == "moonshot":
+    if provider == "moonshot":
         return bool(settings.moonshot_api_key)
-    if settings.llm_provider == "anthropic":
+    if provider == "anthropic":
         return bool(settings.anthropic_api_key)
     return False
+
+
+def provider_is_configured(settings: Settings) -> bool:
+    return provider_has_key(settings, settings.llm_provider)
+
+
+def configured_provider_order(settings: Settings) -> list[LLMProvider]:
+    if settings.llm_provider == "none":
+        return []
+    providers: list[LLMProvider] = []
+    if settings.llm_provider in PROVIDER_FALLBACK_ORDER:
+        providers.append(settings.llm_provider)
+    providers.extend(provider for provider in PROVIDER_FALLBACK_ORDER if provider not in providers)
+    return [provider for provider in providers if provider_has_key(settings, provider)]
+
+
+def settings_for_provider(settings: Settings, provider: LLMProvider) -> Settings:
+    return replace(settings, llm_provider=provider)
 
 
 def provider_settings_payload(settings: Settings) -> Dict[str, Any]:

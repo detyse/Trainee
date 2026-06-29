@@ -7,6 +7,7 @@ import yaml
 
 import trainee.cli as cli
 from trainee.cli import build_tool_manifest, call_tool, init_project, load_tool_input, main, prepare_project
+from trainee.provider_probe import ProviderProbeResult
 
 
 def test_tool_manifest_exposes_tool_call_safe_names():
@@ -18,6 +19,7 @@ def test_tool_manifest_exposes_tool_call_safe_names():
     assert "loop_start" in names
     assert "runs_get" in names
     assert "runtime_debug_update" in names
+    assert "runtime_provider_test" in names
     assert "runtime_system_prompt_get" in names
     assert "runtime_system_prompt_update" in names
     assert "project_get_program" not in names
@@ -56,7 +58,7 @@ def test_init_project_initializes_project_files(tmp_path):
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
     (project / "config.yaml").write_text("epochs: 1\n", encoding="utf-8")
 
-    result = init_project(project)
+    result = init_project(project, skip_provider_test=True)
 
     trainee_dir = project / ".trainee"
     project_yaml = yaml.safe_load((trainee_dir / "project.yaml").read_text(encoding="utf-8"))
@@ -90,7 +92,7 @@ def test_init_project_detects_initialized_project_and_keeps_files(tmp_path):
     (trainee_dir / "program.md").write_text("custom rules\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
 
-    result = init_project(project)
+    result = init_project(project, skip_provider_test=True)
 
     assert result["already_initialized"] is True
     assert result["files_written"] == []
@@ -114,7 +116,7 @@ def test_init_project_does_not_create_program_for_existing_project(tmp_path):
     (trainee_dir / "context.md").write_text("custom context\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
 
-    result = init_project(project)
+    result = init_project(project, skip_provider_test=True)
 
     assert result["files_written"] == []
     assert (trainee_dir / "project.yaml").read_text(encoding="utf-8") == project_yaml
@@ -128,7 +130,7 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
     (project / "config.yaml").write_text("epochs: 1\n", encoding="utf-8")
 
-    exit_code = main(["init", str(project)])
+    exit_code = main(["init", str(project), "--skip-provider-test"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -166,6 +168,29 @@ def test_init_command_prints_agent_style_activity(tmp_path, capsys):
     assert "uvicorn" not in output.lower()
 
 
+def test_init_command_fails_when_provider_test_fails(tmp_path, capsys, monkeypatch):
+    project = tmp_path / "toymodel"
+    project.mkdir()
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+
+    async def fake_probe_provider(settings):
+        return ProviderProbeResult(
+            provider="moonshot",
+            model="kimi-test",
+            ok=False,
+            status="request_failed",
+            http_status=401,
+            error_message="Provider returned HTTP 401.",
+        )
+
+    monkeypatch.setattr(cli, "probe_provider", fake_probe_provider)
+
+    exit_code = main(["init", str(project)])
+
+    assert exit_code == 1
+    assert "LLM provider test failed" in capsys.readouterr().err
+
+
 def test_init_command_sets_explicit_baseline_config(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
@@ -180,6 +205,7 @@ def test_init_command_sets_explicit_baseline_config(tmp_path, capsys, monkeypatc
             str(project),
             "--baseline-config",
             "configs/base.yaml",
+            "--skip-provider-test",
         ]
     )
 
@@ -202,7 +228,7 @@ def test_prepare_supplements_empty_tuning_after_project_yaml_baseline_is_set(tmp
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
     (project / "configs" / "base.yaml").write_text("lr: 0.001\n", encoding="utf-8")
 
-    assert main(["init", str(project)]) == 0
+    assert main(["init", str(project), "--skip-provider-test"]) == 0
     project_yaml_path = project / ".trainee" / "project.yaml"
     project_yaml = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
     project_yaml["launch"]["baseline_config"] = "configs/base.yaml"
@@ -210,7 +236,7 @@ def test_prepare_supplements_empty_tuning_after_project_yaml_baseline_is_set(tmp
     edited_project_yaml = project_yaml_path.read_text(encoding="utf-8")
     capsys.readouterr()
 
-    assert main(["prepare", str(project)]) == 0
+    assert main(["prepare", str(project), "--skip-provider-test"]) == 0
 
     output = capsys.readouterr().out
     tuning_payload = yaml.safe_load((project / ".trainee" / "tuning.yaml").read_text(encoding="utf-8"))
@@ -237,14 +263,14 @@ output:
         encoding="utf-8",
     )
 
-    assert main(["init", str(project), "--baseline-config", "configs/base.yaml"]) == 0
+    assert main(["init", str(project), "--baseline-config", "configs/base.yaml", "--skip-provider-test"]) == 0
     project_yaml_path = project / ".trainee" / "project.yaml"
     project_yaml = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
     project_yaml["output"]["config_path"] = "output.root"
     project_yaml_path.write_text(yaml.safe_dump(project_yaml, sort_keys=False), encoding="utf-8")
     capsys.readouterr()
 
-    assert main(["prepare", str(project)]) == 0
+    assert main(["prepare", str(project), "--skip-provider-test"]) == 0
 
     output = capsys.readouterr().out
     project_yaml = yaml.safe_load((project / ".trainee" / "project.yaml").read_text(encoding="utf-8"))
@@ -261,7 +287,7 @@ def test_tunables_discover_applies_to_tuning_yaml(tmp_path, capsys, monkeypatch)
     (project / "configs").mkdir(parents=True)
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
     (project / "configs" / "base.yaml").write_text("lr: 0.001\n", encoding="utf-8")
-    assert main(["init", str(project), "--baseline-config", "configs/base.yaml"]) == 0
+    assert main(["init", str(project), "--baseline-config", "configs/base.yaml", "--skip-provider-test"]) == 0
     (project / ".trainee" / "tuning.yaml").write_text("version: 1\nparams: []\n", encoding="utf-8")
     capsys.readouterr()
 
@@ -295,8 +321,8 @@ fit:
         encoding="utf-8",
     )
 
-    init_project(project, baseline_config="configs/base.yaml")
-    result = prepare_project(project)
+    init_project(project, baseline_config="configs/base.yaml", skip_provider_test=True)
+    result = prepare_project(project, skip_provider_test=True)
 
     paths = {item.config_path for item in result["config"].tuning.params}
     assert "fit.term_weights.theta" in paths
@@ -313,7 +339,7 @@ def test_init_command_reports_already_initialized_project(tmp_path, capsys):
     (trainee_dir / "program.md").write_text("custom rules\n", encoding="utf-8")
     (trainee_dir / "README.md").write_text("custom readme\n", encoding="utf-8")
 
-    exit_code = main(["init", str(project)])
+    exit_code = main(["init", str(project), "--skip-provider-test"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -373,13 +399,18 @@ def test_version_command_prints_version_and_last_update(capsys):
     assert capsys.readouterr().out == "Trainee 0.1.3\nLast updated: 2026-06-27 21:52:54 +08:00\n"
 
 
-def test_run_command_executes_project_config_unsafe(tmp_path, capsys):
+def test_run_command_executes_project_config_unsafe(tmp_path, capsys, monkeypatch):
     project = tmp_path / "toymodel"
     project.mkdir()
     (project / "data").mkdir()
     (project / "train.py").write_text("print('total_loss=0.5')\n", encoding="utf-8")
 
-    assert main(["init", str(project)]) == 0
+    async def fake_probe_provider(settings):
+        return ProviderProbeResult(provider="openai", model="test-model", ok=True, status="success")
+
+    monkeypatch.setattr(cli, "probe_provider", fake_probe_provider)
+
+    assert main(["init", str(project), "--skip-provider-test"]) == 0
     project_yaml_path = project / ".trainee" / "project.yaml"
     project_yaml = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
     project_yaml["run"]["max_rounds"] = 1

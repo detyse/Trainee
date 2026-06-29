@@ -4,7 +4,7 @@
 
 Trainee is a conservative agent runtime for automating external model-training loops.
 
-It does not contain your training code. Instead, it connects to an existing training project, runs the project’s own training command, watches for progress signals, extracts metrics, asks an LLM or a fallback decision policy for the next parameter set, and repeats until it stops.
+It does not contain your training code. Instead, it connects to an existing training project, runs the project’s own training command, watches for progress signals, extracts metrics, asks a configured LLM for the next parameter set, and repeats until it stops.
 
 The intended loop is:
 
@@ -114,7 +114,7 @@ trainee init --force
 
 `--baseline-config` must point to an existing file inside the project. Trainee records it as `launch.baseline_config`; each round copies it to `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that generated path to the launcher as `--config <path>`.
 
-`trainee init` does not infer tunable parameters or output paths. Fill `output.config_path` with the field in `launch.baseline_config` that controls the training output directory, then run `trainee prepare`. Prepare reads the project context and baseline config, validates configured fields, and fills an empty `.trainee/tuning.yaml`. Tunable discovery uses the configured LLM when available and falls back to conservative heuristics. Review generated config before running. `launch.args` and `run.fixed_args` are excluded from discovery.
+`trainee init` does not infer tunable parameters or output paths. Fill `output.config_path` with the field in `launch.baseline_config` that controls the training output directory, then run `trainee prepare`. Prepare reads the project context and baseline config, validates configured fields, and fills an empty `.trainee/tuning.yaml`. Tunable discovery can still use conservative heuristics, but runtime decisions require a working provider. Review generated config before running. `launch.args` and `run.fixed_args` are excluded from discovery.
 
 You can run `trainee init`, edit `launch.baseline_config` and `output.config_path` in `.trainee/project.yaml`, then run `trainee prepare`. Prepare keeps existing project settings and fills generated tuning params when needed.
 
@@ -347,7 +347,7 @@ Provider settings can also be edited in the Web UI. They are saved to:
 
 The global decision system prompt is stored in the same file and can be edited from the Web UI or `/api/runtime/system-prompt`.
 
-If no provider is configured, Trainee uses a limited heuristic fallback. That is useful for smoke tests, but not a replacement for an actual research decision model.
+Provider availability is checked with a live API request during `init`, `prepare`, `doctor`, and `run`. Use `--skip-provider-test` only for offline setup commands such as `init`, `prepare`, or `doctor`; `run` always requires a working provider. If the active provider fails during a decision, Trainee tries other configured providers and stops the session if all provider attempts fail. It does not use heuristic parameter changes as a runtime fallback.
 
 ## Prompt and project guidance
 
@@ -369,10 +369,10 @@ Use `advanced.tuning_prompt` for run-specific tuning strategy.
 
 ```bash
 trainee version
-trainee init [project_root] [--baseline-config PATH] [--force]
-trainee prepare [project_root] [--replace]
+trainee init [project_root] [--baseline-config PATH] [--force] [--skip-provider-test]
+trainee prepare [project_root] [--replace] [--skip-provider-test]
 trainee tunables discover [project_root] [--apply] [--replace] [--limit N]
-trainee doctor [project_root]
+trainee doctor [project_root] [--skip-provider-test]
 trainee run [project_root] [--dry-run] [--guarded | --unsafe]
 trainee webui [--host HOST] [--port PORT] [--reload] [--no-open]
 trainee serve [--host HOST] [--port PORT] [--reload]
@@ -385,7 +385,7 @@ Notes:
 
 - Running `trainee` with no subcommand starts the local service, equivalent to `trainee serve`.
 - `trainee run --dry-run` runs preflight checks and prints the baseline command without creating a runtime database.
-- `trainee doctor` fails before a session starts if data paths, environment, launcher, sandbox paths, or config validation are not ready.
+- `trainee doctor` fails before a session starts if data paths, environment, launcher, sandbox paths, provider live test, or config validation are not ready.
 
 ## Web UI
 
@@ -404,7 +404,7 @@ The UI can:
 - Edit provider settings and the global system prompt.
 - Save and apply prompt presets.
 - Inspect run logs, decisions, agent traces, W&B links, reports, and ledgers.
-- Test the configured LLM provider from `/llm-test`.
+- Test the configured LLM provider from `/llm-test` or the provider settings panel.
 
 To start the service without opening a browser:
 
@@ -478,7 +478,7 @@ Before using Trainee on a real training project:
 8. For guarded mode, make the training job write logs, checkpoints, W&B files, and caches under `.trainee/`.
 9. Run `trainee doctor`.
 10. Run `trainee run --dry-run` and inspect the printed command.
-11. Configure an LLM provider if you expect non-trivial tuning decisions.
+11. Configure and live-test an LLM provider before starting the loop.
 12. Start with a small `max_rounds` and short timeout before increasing the budget.
 
 ## Development

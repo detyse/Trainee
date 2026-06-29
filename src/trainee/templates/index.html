@@ -127,6 +127,18 @@
         await refreshSection("#runtime-section", "/fragments/runtime");
       };
 
+      window.testProvider = async () => {
+        const output = document.getElementById("provider-test-output");
+        if (output) {
+          output.textContent = "Testing provider...";
+        }
+        const response = await fetch("/api/runtime/provider/test", { method: "POST" });
+        const payload = await response.json();
+        if (output) {
+          output.textContent = JSON.stringify(payload, null, 2);
+        }
+      };
+
       window.applyPromptPreset = (select) => {
         const dataNode = document.getElementById("prompt-presets-data");
         if (!dataNode || !select.value) return;

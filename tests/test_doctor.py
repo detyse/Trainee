@@ -9,13 +9,14 @@ import yaml
 from trainee.cli import init_project, main
 from trainee.doctor import _check_environment, _check_launcher, format_doctor_report, run_doctor
 from trainee.models import OutputConfig, ProjectSpec, TunableParam
+from trainee.provider_probe import ProviderProbeResult
 
 
 def test_doctor_reports_missing_project_scaffold(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
 
-    report = run_doctor(project)
+    report = run_doctor(project, skip_provider_test=True)
 
     assert report.has_failures
     text = format_doctor_report(report)
@@ -29,7 +30,7 @@ def test_init_project_creates_doctor_required_directories(tmp_path: Path) -> Non
     project.mkdir()
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
 
-    init_project(project)
+    init_project(project, skip_provider_test=True)
 
     assert (project / ".trainee" / "runs").is_dir()
     assert (project / ".trainee" / "logs").is_dir()
@@ -42,10 +43,34 @@ def test_doctor_reports_invalid_project_yaml(tmp_path: Path) -> None:
     (trainee_dir / "logs").mkdir()
     (trainee_dir / "project.yaml").write_text("launch: [", encoding="utf-8")
 
-    report = run_doctor(project)
+    report = run_doctor(project, skip_provider_test=True)
 
     assert report.has_failures
     assert "project.yaml is invalid" in format_doctor_report(report)
+
+
+def test_doctor_fails_when_provider_live_test_fails(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    init_project(project, skip_provider_test=True)
+
+    async def fake_probe(settings):
+        return ProviderProbeResult(
+            provider="moonshot",
+            model="kimi-test",
+            ok=False,
+            status="request_failed",
+            http_status=401,
+            error_message="Provider returned HTTP 401.",
+        )
+
+    monkeypatch.setattr("trainee.doctor.probe_provider", fake_probe)
+
+    report = run_doctor(project)
+
+    assert report.has_failures
+    assert "LLM provider live test failed" in format_doctor_report(report)
 
 
 def test_launcher_analysis_warns_on_unsafe_outputs_and_unbounded_params(tmp_path: Path) -> None:
@@ -227,12 +252,12 @@ def test_doctor_cli_returns_nonzero_only_for_failures(tmp_path: Path, capsys, mo
     project = tmp_path / "project"
     project.mkdir()
 
-    assert main(["doctor", str(project)]) == 1
+    assert main(["doctor", str(project), "--skip-provider-test"]) == 1
     assert "not ready" in capsys.readouterr().out
 
     (project / "data").mkdir()
     (project / "train.py").write_text("print('train')\n", encoding="utf-8")
-    init_project(project)
+    init_project(project, skip_provider_test=True)
     project_yaml_path = project / ".trainee" / "project.yaml"
     payload = yaml.safe_load(project_yaml_path.read_text(encoding="utf-8"))
     payload["launch"]["args"].append(
@@ -250,7 +275,7 @@ def test_doctor_cli_returns_nonzero_only_for_failures(tmp_path: Path, capsys, mo
 
     monkeypatch.setattr("trainee.doctor.shutil.which", fake_which)
 
-    assert main(["doctor", str(project)]) == 0
+    assert main(["doctor", str(project), "--skip-provider-test"]) == 0
     output = capsys.readouterr().out
     assert "Trainee doctor" in output
     assert "Result\n  ready" in output
