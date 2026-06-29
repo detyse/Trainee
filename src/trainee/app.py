@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData
 
+from trainee import __version__
 from trainee.events import EventBus
 from trainee.fixed_prompts import fixed_prompt_inventory
 from trainee.logging import configure_logging, get_logger
@@ -62,7 +63,7 @@ from trainee.providers import (
     provider_update_from_form,
 )
 from trainee.reporter import ReportGenerator
-from trainee.settings import Settings, load_settings, save_global_config
+from trainee.settings import DEFAULT_LLM_TEMPERATURE, Settings, load_settings, save_global_config
 from trainee.storage import ImageAnalysisLimitExceeded, Storage
 from trainee.tunable_discovery import (
     TunableDiscoveryApply,
@@ -97,6 +98,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     app_settings = settings or load_settings()
     templates = Jinja2Templates(directory=str(app_settings.template_dir))       # 
     templates.env.filters["toyaml"] = _yaml_dump
+    templates.env.globals["app_version"] = __version__
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -647,6 +649,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         request: Request,
         llm_provider: str = Form("none"),
         llm_timeout_sec: float = Form(DEFAULT_LLM_TIMEOUT_SEC),
+        llm_temperature: float = Form(DEFAULT_LLM_TEMPERATURE),
         openai_api_key: str = Form(""),
         clear_openai_api_key: Optional[str] = Form(None),
         openai_base_url: str = Form(DEFAULT_OPENAI_BASE_URL),
@@ -663,25 +666,26 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
         anthropic_max_tokens: int = Form(DEFAULT_ANTHROPIC_MAX_TOKENS),
     ) -> HTMLResponse:
         runtime = get_runtime(request)
-        update = provider_update_from_form(
-            llm_provider=llm_provider,
-            llm_timeout_sec=llm_timeout_sec,
-            openai_api_key=openai_api_key,
-            clear_openai_api_key=clear_openai_api_key is not None,
-            openai_base_url=openai_base_url,
-            openai_model=openai_model,
-            moonshot_api_key=moonshot_api_key,
-            clear_moonshot_api_key=clear_moonshot_api_key is not None,
-            moonshot_base_url=moonshot_base_url,
-            moonshot_model=moonshot_model,
-            anthropic_api_key=anthropic_api_key,
-            clear_anthropic_api_key=clear_anthropic_api_key is not None,
-            anthropic_base_url=anthropic_base_url,
-            anthropic_model=anthropic_model,
-            anthropic_version=anthropic_version,
-            anthropic_max_tokens=anthropic_max_tokens,
-        )
         try:
+            update = provider_update_from_form(
+                llm_provider=llm_provider,
+                llm_timeout_sec=llm_timeout_sec,
+                llm_temperature=llm_temperature,
+                openai_api_key=openai_api_key,
+                clear_openai_api_key=clear_openai_api_key is not None,
+                openai_base_url=openai_base_url,
+                openai_model=openai_model,
+                moonshot_api_key=moonshot_api_key,
+                clear_moonshot_api_key=clear_moonshot_api_key is not None,
+                moonshot_base_url=moonshot_base_url,
+                moonshot_model=moonshot_model,
+                anthropic_api_key=anthropic_api_key,
+                clear_anthropic_api_key=clear_anthropic_api_key is not None,
+                anthropic_base_url=anthropic_base_url,
+                anthropic_model=anthropic_model,
+                anthropic_version=anthropic_version,
+                anthropic_max_tokens=anthropic_max_tokens,
+            )
             _update_provider_settings(request, runtime, update)
         except (OSError, ValueError) as exc:
             status_code = 409 if runtime.loop_is_running() else 400

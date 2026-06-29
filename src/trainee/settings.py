@@ -10,6 +10,7 @@ LLMProvider = Literal["none", "moonshot", "openai", "anthropic"]
 
 DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
+DEFAULT_LLM_TEMPERATURE = 1.0
 DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION = 3
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "defaults" / "system_prompt.txt"
 
@@ -50,6 +51,7 @@ class Settings:
     moonshot_model: str = DEFAULT_MOONSHOT_MODEL
     max_image_analyses_per_session: int = DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION
     agent_debug_enabled: bool = False
+    llm_temperature: float = DEFAULT_LLM_TEMPERATURE
 
     @property
     def data_dir(self) -> Path:
@@ -93,6 +95,7 @@ def load_settings(
         global_config_path=global_config_path,
         llm_provider=_resolve_llm_provider(config_payload),
         llm_timeout_sec=float(_settings_value("TRAINEE_LLM_TIMEOUT_SEC", config_payload, "30")),
+        llm_temperature=float(_settings_value("TRAINEE_LLM_TEMPERATURE", config_payload, str(DEFAULT_LLM_TEMPERATURE))),
         openai_api_key=_settings_value("OPENAI_API_KEY", config_payload),
         openai_base_url=_settings_value("OPENAI_BASE_URL", config_payload, "https://api.openai.com/v1"),
         openai_model=_settings_value("OPENAI_MODEL", config_payload, "gpt-4o-mini"),
@@ -120,7 +123,7 @@ def save_global_config(config_path: Path, payload: Dict[str, Any]) -> None:
     config = _read_config(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for key in ("llm_provider", "llm_timeout_sec", "agent_debug_enabled", "system_prompt"):
+    for key in ("llm_provider", "llm_timeout_sec", "llm_temperature", "agent_debug_enabled", "system_prompt"):
         if key in payload:
             config[key] = payload[key]
 
@@ -214,6 +217,8 @@ def _config_value(name: str, config_payload: Dict[str, Any]) -> Any:
         return config_payload.get("llm_provider")
     if name == "TRAINEE_LLM_TIMEOUT_SEC":
         return config_payload.get("llm_timeout_sec")
+    if name == "TRAINEE_LLM_TEMPERATURE":
+        return config_payload.get("llm_temperature")
     if name == "TRAINEE_MAX_IMAGE_ANALYSES_PER_SESSION":
         return config_payload.get("max_image_analyses_per_session")
     provider_keys = {

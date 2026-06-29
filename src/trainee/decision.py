@@ -689,7 +689,7 @@ class DecisionEngine:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": self._openai_user_content(user_prompt, image)},
             ],
-            "temperature": 0.2,
+            "temperature": self.settings.llm_temperature,
         }
 
     def _moonshot_payload(
@@ -704,7 +704,7 @@ class DecisionEngine:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": self._openai_user_content(user_prompt, image)},
             ],
-            "temperature": 0.2,
+            "temperature": self.settings.llm_temperature,
         }
 
     def _anthropic_payload(
@@ -723,7 +723,7 @@ class DecisionEngine:
                     "content": self._anthropic_user_content(user_prompt, image),
                 }
             ],
-            "temperature": 0.2,
+            "temperature": self.settings.llm_temperature,
         }
 
     def _openai_user_content(self, prompt: str, image: Optional[dict[str, str]]) -> Any:

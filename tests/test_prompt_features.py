@@ -185,6 +185,7 @@ def test_runtime_provider_settings_save_to_config_json(runtime_env):
         data={
             "llm_provider": "openai",
             "llm_timeout_sec": "12",
+            "llm_temperature": "0.7",
             "openai_api_key": "test-openai-key",
             "openai_base_url": "https://openai.example/v1",
             "openai_model": "gpt-ui",
@@ -203,6 +204,7 @@ def test_runtime_provider_settings_save_to_config_json(runtime_env):
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["llm_provider"] == "openai"
     assert config["llm_timeout_sec"] == 12.0
+    assert config["llm_temperature"] == 0.7
     assert config["openai"]["api_key"] == "test-openai-key"
     assert config["openai"]["base_url"] == "https://openai.example/v1"
     assert config["openai"]["model"] == "gpt-ui"
@@ -221,6 +223,7 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
         json={
             "llm_provider": "moonshot",
             "llm_timeout_sec": 9,
+            "llm_temperature": 0.8,
             "moonshot": {
                 "api_key": "moonshot-secret",
                 "base_url": "https://moonshot.example/v1",
@@ -232,14 +235,35 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
     assert response.status_code == 200
     payload = response.json()
     assert payload["llm_provider"] == "moonshot"
+    assert payload["llm_temperature"] == 0.8
     assert payload["active_model"] == "kimi-api"
     assert payload["moonshot_key_configured"] is True
     assert "api_key" not in json.dumps(payload)
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["llm_provider"] == "moonshot"
+    assert config["llm_temperature"] == 0.8
     assert config["moonshot"]["api_key"] == "moonshot-secret"
     assert client.get("/api/health").json()["llm_provider"] == "moonshot"
+
+
+def test_runtime_provider_settings_reject_negative_temperature(runtime_env):
+    client = runtime_env["client"]
+
+    api_response = client.post(
+        "/api/runtime/provider",
+        json={"llm_provider": "none", "llm_temperature": -0.1},
+    )
+    ui_response = client.post(
+        "/ui/runtime/provider",
+        data={"llm_provider": "none", "llm_temperature": "-0.1"},
+        headers={"HX-Request": "true"},
+    )
+
+    assert api_response.status_code == 400
+    assert "temperature" in api_response.json()["detail"]
+    assert ui_response.status_code == 400
+    assert "temperature" in ui_response.json()["detail"]
 
 
 def test_runtime_provider_test_api_returns_probe_result(runtime_env, monkeypatch):

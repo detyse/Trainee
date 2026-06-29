@@ -10,7 +10,7 @@ from trainee.decision import DecisionEngine
 from trainee.models import MetricSpec, ProjectContext, ProjectSpec, RoundRecord, TunableParam
 from trainee.prompt_assembler import PromptAssembler
 from trainee.research_state import ResearchStateBuilder
-from trainee.settings import Settings, load_default_system_prompt, load_settings
+from trainee.settings import DEFAULT_LLM_TEMPERATURE, Settings, load_default_system_prompt, load_settings
 
 
 def test_load_settings_defaults_runtime_data_to_home_and_config_to_home(tmp_path, monkeypatch):
@@ -28,6 +28,7 @@ def test_load_settings_defaults_runtime_data_to_home_and_config_to_home(tmp_path
     assert settings.global_config_path == tmp_path / ".trainee" / "config.json"
     assert settings.config_path == settings.global_config_path
     assert settings.agent_debug_enabled is False
+    assert settings.llm_temperature == DEFAULT_LLM_TEMPERATURE == 1.0
     assert settings.system_prompt == load_default_system_prompt()
     saved = jsonlib.loads(settings.global_config_path.read_text(encoding="utf-8"))
     assert saved["system_prompt"] == settings.system_prompt
@@ -125,6 +126,7 @@ def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
         "ANTHROPIC_VERSION",
         "ANTHROPIC_MAX_TOKENS",
         "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -139,6 +141,7 @@ def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
                 "ANTHROPIC_VERSION=2023-06-01",
                 "ANTHROPIC_MAX_TOKENS=2048",
                 "TRAINEE_LLM_TIMEOUT_SEC=45",
+                "TRAINEE_LLM_TEMPERATURE=0.2",
             ]
         )
         + "\n",
@@ -155,6 +158,7 @@ def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
     assert settings.anthropic_model == "claude-3-5-haiku-latest"
     assert settings.anthropic_max_tokens == 1024
     assert settings.llm_timeout_sec == 30.0
+    assert settings.llm_temperature == DEFAULT_LLM_TEMPERATURE
 
 
 def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
@@ -174,6 +178,7 @@ def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
         "ANTHROPIC_VERSION",
         "ANTHROPIC_MAX_TOKENS",
         "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -184,6 +189,7 @@ def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
             {
                 "llm_provider": "openai",
                 "llm_timeout_sec": 22,
+                "llm_temperature": 0.6,
                 "openai": {
                     "api_key": "config-openai-key",
                     "base_url": "https://openai.example/v1",
@@ -205,6 +211,7 @@ def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
     assert settings.openai_base_url == "https://openai.example/v1"
     assert settings.openai_model == "gpt-custom"
     assert settings.llm_timeout_sec == 22.0
+    assert settings.llm_temperature == 0.6
     assert settings.agent_debug_enabled is False
 
 
@@ -237,6 +244,7 @@ def test_load_settings_reads_moonshot_provider(tmp_path, monkeypatch):
         "ANTHROPIC_VERSION",
         "ANTHROPIC_MAX_TOKENS",
         "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -279,14 +287,22 @@ def test_environment_overrides_home_config(tmp_path, monkeypatch):
         "ANTHROPIC_VERSION",
         "ANTHROPIC_MAX_TOKENS",
         "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OPENAI_MODEL", "env-model")
+    monkeypatch.setenv("TRAINEE_LLM_TEMPERATURE", "0.4")
     config_path = tmp_path / "home" / ".trainee" / "config.json"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
-        jsonlib.dumps({"llm_provider": "openai", "openai": {"api_key": "config-key", "model": "config-model"}}),
+        jsonlib.dumps(
+            {
+                "llm_provider": "openai",
+                "llm_temperature": 0.8,
+                "openai": {"api_key": "config-key", "model": "config-model"},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -294,6 +310,7 @@ def test_environment_overrides_home_config(tmp_path, monkeypatch):
 
     assert settings.openai_model == "env-model"
     assert settings.openai_api_key == "config-key"
+    assert settings.llm_temperature == 0.4
 
 
 def test_decision_engine_uses_moonshot_chat_completions(monkeypatch):

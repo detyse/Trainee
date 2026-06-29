@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from trainee.settings import DEFAULT_MOONSHOT_BASE_URL, DEFAULT_MOONSHOT_MODEL, LLMProvider, Settings
+from trainee.settings import (
+    DEFAULT_LLM_TEMPERATURE,
+    DEFAULT_MOONSHOT_BASE_URL,
+    DEFAULT_MOONSHOT_MODEL,
+    LLMProvider,
+    Settings,
+)
 
 ProviderName = Literal["none", "moonshot", "openai", "anthropic"]
 PROVIDER_NAMES: tuple[ProviderName, ...] = ("none", "moonshot", "openai", "anthropic")
@@ -46,6 +53,7 @@ class AnthropicProviderUpdate(BaseModel):
 class ProviderSettingsUpdate(BaseModel):
     llm_provider: str = "none"
     llm_timeout_sec: float = DEFAULT_LLM_TIMEOUT_SEC
+    llm_temperature: float = DEFAULT_LLM_TEMPERATURE
     openai: OpenAIProviderUpdate = Field(default_factory=OpenAIProviderUpdate)
     moonshot: MoonshotProviderUpdate = Field(default_factory=MoonshotProviderUpdate)
     anthropic: AnthropicProviderUpdate = Field(default_factory=AnthropicProviderUpdate)
@@ -118,6 +126,7 @@ def provider_settings_payload(settings: Settings) -> Dict[str, Any]:
     return {
         "llm_provider": settings.llm_provider,
         "llm_timeout_sec": settings.llm_timeout_sec,
+        "llm_temperature": settings.llm_temperature,
         "agent_debug_enabled": settings.agent_debug_enabled,
         "active_model": active_model(settings),
         "openai_base_url": settings.openai_base_url,
@@ -138,12 +147,15 @@ def build_provider_config_payload(update: ProviderSettingsUpdate) -> Dict[str, A
     provider = normalize_provider(update.llm_provider)
     if update.llm_timeout_sec <= 0:
         raise ValueError("timeout must be positive")
+    if not math.isfinite(update.llm_temperature) or update.llm_temperature < 0:
+        raise ValueError("temperature must be a non-negative finite number")
     if update.anthropic.max_tokens <= 0:
         raise ValueError("anthropic max tokens must be positive")
 
     payload: Dict[str, Any] = {
         "llm_provider": provider,
         "llm_timeout_sec": update.llm_timeout_sec,
+        "llm_temperature": update.llm_temperature,
         "openai": {
             "base_url": _clean(update.openai.base_url, DEFAULT_OPENAI_BASE_URL),
             "model": _clean(update.openai.model, DEFAULT_OPENAI_MODEL),
@@ -169,6 +181,7 @@ def provider_update_from_form(
     *,
     llm_provider: str,
     llm_timeout_sec: float,
+    llm_temperature: float,
     openai_api_key: str,
     clear_openai_api_key: bool,
     openai_base_url: str,
@@ -187,6 +200,7 @@ def provider_update_from_form(
     return ProviderSettingsUpdate(
         llm_provider=llm_provider,
         llm_timeout_sec=llm_timeout_sec,
+        llm_temperature=llm_temperature,
         openai=OpenAIProviderUpdate(
             api_key=openai_api_key,
             clear_api_key=clear_openai_api_key,

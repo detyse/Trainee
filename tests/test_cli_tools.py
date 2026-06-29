@@ -455,7 +455,7 @@ def test_version_command_prints_version_and_last_update(capsys):
     exit_code = main(["version"])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "Trainee 0.1.5\nLast updated: 2026-06-29 19:38:47 +08:00\n"
+    assert capsys.readouterr().out == "Trainee 0.1.6\nLast updated: 2026-06-29 22:17:54 +08:00\n"
 
 
 def test_run_command_executes_project_config_unsafe(tmp_path, capsys, monkeypatch):

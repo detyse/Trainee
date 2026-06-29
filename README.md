@@ -350,6 +350,8 @@ Provider settings can also be edited in the Web UI. They are saved to:
 ~/.trainee/config.json
 ```
 
+The shared provider temperature defaults to `1.0` and can be changed from Provider Settings, `llm_temperature` in `config.json`, or `TRAINEE_LLM_TEMPERATURE`.
+
 The global decision system prompt is stored in the same file and can be edited from the Web UI or `/api/runtime/system-prompt`.
 
 Provider availability is checked with a live API request during `init`, `prepare`, `doctor`, and `run`. Use `--skip-provider-test` only for offline setup commands such as `init`, `prepare`, or `doctor`; `run` always requires a working provider. If the active provider fails during a decision, Trainee tries other configured providers and stops the session if all provider attempts fail. It does not use heuristic parameter changes as a runtime fallback.

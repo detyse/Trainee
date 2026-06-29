@@ -21,6 +21,10 @@
       <strong>{{ runtime_settings.llm_timeout_sec }}s</strong>
     </div>
     <div>
+      <span class="label">Temperature</span>
+      <strong>{{ runtime_settings.llm_temperature }}</strong>
+    </div>
+    <div>
       <span class="label">Database</span>
       <strong>{{ "ok" if health.db_ok else "failed" }}</strong>
     </div>
@@ -88,6 +92,10 @@
       <label>
         <span>Timeout sec</span>
         <input type="number" step="0.1" min="0.1" name="llm_timeout_sec" value="{{ runtime_settings.llm_timeout_sec }}" />
+      </label>
+      <label>
+        <span>Temperature</span>
+        <input type="number" step="0.1" min="0" name="llm_temperature" value="{{ runtime_settings.llm_temperature }}" />
       </label>
       <div>
         <span class="label">Global config file</span>

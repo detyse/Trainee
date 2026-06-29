@@ -12,7 +12,7 @@ import pytest
 from trainee.decision import DecisionEngine
 from trainee.models import AgentTrace, MetricSpec, ProjectContext, ProjectSpec, RoundRecord, RunSession, TunableParam
 from trainee.research_state import ResearchStateBuilder
-from trainee.settings import Settings
+from trainee.settings import DEFAULT_LLM_TEMPERATURE, Settings
 from trainee.storage import Storage
 
 
@@ -86,6 +86,22 @@ def _run_decision(engine: DecisionEngine, spec: ProjectSpec, context: ProjectCon
             prompt_documents=[],
         )
     )
+
+
+@pytest.mark.parametrize("provider", ["openai", "moonshot", "anthropic"])
+def test_provider_payload_uses_configured_temperature(tmp_path: Path, provider: str) -> None:
+    settings = replace(_settings(tmp_path, provider), llm_temperature=0.7)
+    engine = DecisionEngine(settings)
+
+    if provider == "openai":
+        payload = engine._openai_payload("system", "user")
+    elif provider == "moonshot":
+        payload = engine._moonshot_payload("system", "user")
+    else:
+        payload = engine._anthropic_payload("system", "user")
+
+    assert payload["temperature"] == settings.llm_temperature == 0.7
+    assert _settings(tmp_path, provider).llm_temperature == DEFAULT_LLM_TEMPERATURE == 1.0
 
 
 @pytest.mark.parametrize(

@@ -357,6 +357,8 @@ Provider 设置也可以在 Web UI 中编辑，并保存到：
 ~/.trainee/config.json
 ```
 
+共享 provider temperature 默认为 `1.0`，可以在 Provider Settings 中修改，也可以通过 `config.json` 的 `llm_temperature` 或 `TRAINEE_LLM_TEMPERATURE` 设置。
+
 全局 decision system prompt 也保存在同一文件中，可以通过 Web UI 或 `/api/runtime/system-prompt` 编辑。
 
 `init`、`prepare`、`doctor` 和 `run` 会通过 live API request 检查 provider 可用性。离线配置时可以对 `init`、`prepare`、`doctor` 使用 `--skip-provider-test`，但 `run` 总是需要可用 provider。
