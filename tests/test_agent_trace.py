@@ -340,7 +340,12 @@ def test_agent_trace_records_http_error_body(tmp_path: Path, monkeypatch) -> Non
     assert result.agent_trace.http_status == 429
     assert result.agent_trace.request_id == "req-rate-limit"
     assert "rate limited" in (result.agent_trace.error_body or "")
-    assert result.agent_trace.provider_error == "Provider returned HTTP 429."
+    assert result.agent_trace.provider_error is not None
+    assert "Provider returned HTTP 429" in result.agent_trace.provider_error
+    assert "https://anthropic.example/v1/messages" in result.agent_trace.provider_error
+    assert "request_id=req-rate-limit" in result.agent_trace.provider_error
+    assert "rate limited" in result.agent_trace.provider_error
+    assert "https://openai.example/v1/chat/completions" in result.agent_trace.attempts[0]["error_message"]
 
 
 def test_decision_uses_next_provider_when_primary_request_fails(tmp_path: Path, monkeypatch) -> None:
@@ -414,7 +419,10 @@ def test_agent_trace_records_transport_and_not_called_reasons(tmp_path: Path, mo
 
     assert timeout_result.agent_trace is not None
     assert timeout_result.agent_trace.status == "request_failed"
-    assert "ReadTimeout" in (timeout_result.agent_trace.provider_error or "")
+    assert timeout_result.agent_trace.provider_error is not None
+    assert "ReadTimeout after 5s" in timeout_result.agent_trace.provider_error
+    assert "https://anthropic.example/v1/messages" in timeout_result.agent_trace.provider_error
+    assert "https://openai.example/v1/chat/completions" in timeout_result.agent_trace.attempts[0]["error_message"]
     assert disabled_result.agent_trace is not None
     assert disabled_result.agent_trace.status == "not_called"
     assert "No configured LLM provider" in (disabled_result.agent_trace.fallback_reason or "")
