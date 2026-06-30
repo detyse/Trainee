@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from trainee.decision import DecisionEngine, ProviderCompletion
+from trainee.decision import DecisionEngine
 from trainee.executor import TrainingExecutor
+from trainee.llm import ProviderCompletion, ProviderDispatchResult
 from trainee.models import AgentDecision, MetricSpec, ProjectContext, ProjectSpec, RoundRecord, TunableParam
 from trainee.research_state import ResearchStateBuilder
 from trainee.security import build_secure_command
@@ -181,7 +182,6 @@ def test_bwrap_allows_only_trainee_writes(tmp_path: Path) -> None:
 
 def test_invalid_provider_params_stop_without_unknown_values(tmp_path: Path) -> None:
     settings = replace(_settings(tmp_path), llm_provider="openai", openai_api_key="openai-key")
-    engine = DecisionEngine(settings)
     spec = _spec(tmp_path / "project")
     context = ProjectContext(project_summary="Fake project")
     history = [
@@ -196,11 +196,33 @@ def test_invalid_provider_params_stop_without_unknown_values(tmp_path: Path) -> 
         )
     ]
 
-    async def invalid_provider(*args, **kwargs):
-        content = '{"action":"continue","next_params":{"unknown":"bad"},"reason":"bad"}'
-        return ProviderCompletion(content=content, raw_response_body=content, http_status=200)
+    class FakeLLMClient:
+        def configured_providers(self):
+            return ["openai"]
 
-    engine._provider_complete = invalid_provider  # type: ignore[method-assign]
+        def build_payload(self, provider, system_prompt, user_prompt):
+            return {"model": "gpt-test", "messages": []}
+
+        async def complete_with_fallback(self, system_prompt, user_prompt):
+            content = '{"action":"continue","next_params":{"unknown":"bad"},"reason":"bad"}'
+            return ProviderDispatchResult(
+                provider="openai",
+                model="gpt-test",
+                completion=ProviderCompletion(content=content, raw_response_body=content, http_status=200),
+                attempts=[
+                    {
+                        "provider": "openai",
+                        "model": "gpt-test",
+                        "ok": True,
+                        "status": "success",
+                        "http_status": 200,
+                        "request_id": None,
+                        "error_message": "",
+                    }
+                ],
+            )
+
+    engine = DecisionEngine(settings, llm_client=FakeLLMClient())  # type: ignore[arg-type]
 
     result = asyncio.run(
         engine.decide_with_prompt(

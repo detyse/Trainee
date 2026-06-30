@@ -9,7 +9,7 @@ from typing import Any, Iterable, Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from trainee.decision import DecisionEngine
+from trainee.llm import LLMClient
 from trainee.models import ParamType, ProjectContext, ProjectSpec, TunableParam
 from trainee.project_config import (
     CommandArg,
@@ -102,9 +102,9 @@ class TunableApplySkip(BaseModel):
 
 
 class TunableDiscoveryEngine:
-    def __init__(self, settings: Settings, decision_engine: Optional[DecisionEngine] = None) -> None:
+    def __init__(self, settings: Settings, llm_client: Optional[LLMClient] = None) -> None:
         self.settings = settings
-        self.decision_engine = decision_engine or DecisionEngine(settings)
+        self.llm_client = llm_client or LLMClient(settings)
         self.prompt_document_loader = PromptDocumentLoader()
 
     async def suggest(
@@ -130,7 +130,7 @@ class TunableDiscoveryEngine:
         try:
             baseline = _load_baseline_mapping(spec)
             leaves = _flatten_scalars(baseline)
-            completion = await self.decision_engine._provider_complete(  # noqa: SLF001 - internal provider adapter reuse
+            completion = await self.llm_client.complete_active(
                 _discovery_system_prompt(),
                 _discovery_user_prompt(spec, context, heuristic, leaves, limit, prompt_documents),
             )

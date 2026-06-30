@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from trainee.context_builder import ContextBuilder
-from trainee.decision import ProviderCompletion
+from trainee.llm import ProviderCompletion
 from trainee.project_config import CommandArg, LaunchConfig, ProjectConfig, RunConfig, compile_project_spec
 from trainee.settings import Settings
 from trainee.tunable_discovery import (
@@ -160,7 +160,7 @@ def test_llm_discovery_uses_project_prompt_and_returns_stage_candidates(tmp_path
     result = _run_async(
         TunableDiscoveryEngine(
             _settings(tmp_path, repo_root, project),
-            decision_engine=fake_engine,  # type: ignore[arg-type]
+            llm_client=fake_engine,  # type: ignore[arg-type]
         ).suggest(spec, context)
     )
 
@@ -251,7 +251,7 @@ class _FakeDiscoveryDecisionEngine:
     def __init__(self) -> None:
         self.user_payload: dict[str, object] = {}
 
-    async def _provider_complete(self, system_prompt: str, user_prompt: str) -> ProviderCompletion:
+    async def complete_active(self, system_prompt: str, user_prompt: str) -> ProviderCompletion:
         assert "auditable" in system_prompt
         self.user_payload = json.loads(user_prompt)
         return ProviderCompletion(

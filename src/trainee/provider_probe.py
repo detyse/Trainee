@@ -4,8 +4,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from trainee.decision import DecisionEngine, ProviderCallError
-from trainee.providers import active_model, configured_provider_order, provider_model, settings_for_provider
+from trainee.llm import LLMClient, ProviderCallError
+from trainee.providers import active_model, configured_provider_order, provider_model
 from trainee.settings import Settings
 
 
@@ -63,11 +63,12 @@ async def probe_provider(settings: Settings) -> ProviderProbeResult:
         )
 
     attempts: list[ProviderProbeAttempt] = []
+    client = LLMClient(settings)
     for provider in providers:
-        provider_settings = settings_for_provider(settings, provider)
-        model = provider_model(provider_settings, provider)
+        model = provider_model(settings, provider)
         try:
-            completion = await DecisionEngine(provider_settings)._provider_complete(
+            completion = await client.complete(
+                provider,
                 PROVIDER_TEST_SYSTEM_PROMPT,
                 PROVIDER_TEST_USER_PROMPT,
             )

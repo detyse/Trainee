@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from trainee.context_builder import ContextBuilder
-from trainee.decision import ProviderCompletion
+from trainee.llm import ProviderCompletion
 from trainee.output_discovery import OutputDiscoveryEngine
 from trainee.project_config import LaunchConfig, ProjectConfig, compile_project_spec
 from trainee.settings import Settings
@@ -27,7 +27,7 @@ def test_output_discovery_accepts_existing_agent_selected_key(tmp_path: Path) ->
     context = ContextBuilder().build(spec)
     fake = _FakeOutputDecision("output.root")
 
-    result = asyncio.run(OutputDiscoveryEngine(_settings(tmp_path, project), decision_engine=fake).suggest(spec, context))
+    result = asyncio.run(OutputDiscoveryEngine(_settings(tmp_path, project), llm_client=fake).suggest(spec, context))
 
     assert fake.user_payload["scalar_config_leaves"]["output.root"] == "outputs"
     assert result.output is not None
@@ -47,7 +47,7 @@ def test_output_discovery_rejects_agent_invented_key(tmp_path: Path) -> None:
     )
     fake = _FakeOutputDecision("output.missing")
 
-    result = asyncio.run(OutputDiscoveryEngine(_settings(tmp_path, project), decision_engine=fake).suggest(spec, ContextBuilder().build(spec)))
+    result = asyncio.run(OutputDiscoveryEngine(_settings(tmp_path, project), llm_client=fake).suggest(spec, ContextBuilder().build(spec)))
 
     assert result.output is None
     assert result.candidates == []
@@ -59,7 +59,7 @@ class _FakeOutputDecision:
         self.selected_path = selected_path
         self.user_payload: dict[str, object] = {}
 
-    async def _provider_complete(self, system_prompt: str, user_prompt: str) -> ProviderCompletion:
+    async def complete_active(self, system_prompt: str, user_prompt: str) -> ProviderCompletion:
         assert "output directory field" in system_prompt
         self.user_payload = json.loads(user_prompt)
         content = {

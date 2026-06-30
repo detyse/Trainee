@@ -8,7 +8,7 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, Field
 
-from trainee.decision import DecisionEngine
+from trainee.llm import LLMClient
 from trainee.models import OutputConfig, ProjectContext, ProjectSpec
 from trainee.prompt_documents import PromptDocument, PromptDocumentLoader
 from trainee.providers import active_model, provider_is_configured
@@ -33,9 +33,9 @@ class OutputDiscoveryResult(BaseModel):
 
 
 class OutputDiscoveryEngine:
-    def __init__(self, settings: Settings, decision_engine: Optional[DecisionEngine] = None) -> None:
+    def __init__(self, settings: Settings, llm_client: Optional[LLMClient] = None) -> None:
         self.settings = settings
-        self.decision_engine = decision_engine or DecisionEngine(settings)
+        self.llm_client = llm_client or LLMClient(settings)
         self.prompt_document_loader = PromptDocumentLoader()
 
     async def suggest(self, spec: ProjectSpec, context: ProjectContext) -> OutputDiscoveryResult:
@@ -52,7 +52,7 @@ class OutputDiscoveryEngine:
         try:
             leaves = _flatten_scalars(_load_yaml_mapping(Path(spec.baseline_config_path)))
             prompt_documents = self.prompt_document_loader.load(spec.project_root)
-            completion = await self.decision_engine._provider_complete(  # noqa: SLF001 - provider adapter reuse
+            completion = await self.llm_client.complete_active(
                 _system_prompt(),
                 _user_prompt(spec, context, leaves, prompt_documents),
             )
