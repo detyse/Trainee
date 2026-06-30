@@ -116,7 +116,7 @@ trainee init --force
 
 `--baseline-config` must point to an existing file inside the project. Trainee records it as `launch.baseline_config`; each round copies it to `.trainee/runs/session-XXXX/round-XXXX/config.yaml` and passes that generated path to the launcher as `--config <path>`.
 
-`trainee init` does not infer tunable parameters or output paths. Fill `output.config_path` with the field in `launch.baseline_config` that controls the training output directory, then run `trainee prepare`. Prepare reads the project context and baseline config, validates configured fields, and fills an empty `.trainee/tuning.yaml`. Tunable discovery can still use conservative heuristics, but runtime decisions require a working provider. Review generated config before running. `launch.args` and `run.fixed_args` are excluded from discovery.
+`trainee init` does not infer tunable parameters or output paths. Fill `output.config_path` with the field in `launch.baseline_config` that controls the training output directory, then run `trainee prepare`. Prepare reads the project context and baseline config, validates configured fields, and fills an empty `.trainee/tuning.yaml`. It creates `.trainee/context.md` only when that file is missing; existing context is kept. Tunable discovery can still use conservative heuristics, but runtime decisions require a working provider. Review generated config before running. `launch.args` and `run.fixed_args` are excluded from discovery.
 
 You can run `trainee init`, edit `launch.baseline_config` and `output.config_path` in `.trainee/project.yaml`, then run `trainee prepare`. Prepare keeps existing project settings and fills generated tuning params when needed.
 

@@ -8,6 +8,7 @@ import sys
 import time
 import webbrowser
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
@@ -49,6 +50,7 @@ from trainee.tunable_discovery import (
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+RUN_PROGRESS_INTERVAL_SEC = 60.0
 RunProgressReporter = Callable[[EventMessage], None]
 
 
@@ -652,7 +654,9 @@ async def prepare_project_async(
             files_written.append(tuning_path)
         else:
             files_unchanged.append(tuning_path)
-    if _write_if_changed(context_path, _render_context_markdown(context)):
+    if context_path.is_file():
+        files_unchanged.append(context_path)
+    elif _write_if_changed(context_path, _render_context_markdown(context)):
         files_written.append(context_path)
     else:
         files_unchanged.append(context_path)
@@ -680,8 +684,16 @@ def prepare_project(project_root: Path, *, replace: bool = False, skip_provider_
     return asyncio.run(prepare_project_async(project_root, replace=replace, skip_provider_test=skip_provider_test))
 
 
+def _run_timestamp() -> str:
+    return datetime.now().astimezone().isoformat(sep=" ", timespec="seconds")
+
+
+def _print_run_line(line: str, *, flush: bool = False) -> None:
+    print(f"[{_run_timestamp()}] {line}", flush=flush)
+
+
 class _RunProgressPrinter:
-    def __init__(self, max_rounds: int | None = None, heartbeat_interval_sec: float = 30.0) -> None:
+    def __init__(self, max_rounds: int | None = None, heartbeat_interval_sec: float = RUN_PROGRESS_INTERVAL_SEC) -> None:
         self.max_rounds = max_rounds
         self.heartbeat_interval_sec = heartbeat_interval_sec
         self._last_heartbeat_by_round: dict[int, float] = {}
@@ -708,7 +720,7 @@ class _RunProgressPrinter:
         line = f"Session {session_id} started"
         if self.max_rounds is not None:
             line += f"; max_rounds={self.max_rounds}"
-        print(line, flush=True)
+        _print_run_line(line, flush=True)
 
     def _print_round_started(self, payload: Mapping[str, Any]) -> None:
         round_index = self._round_index(payload)
@@ -716,7 +728,7 @@ class _RunProgressPrinter:
         line = f"{self._round_label(round_index)} started"
         if round_id is not None:
             line += f" (#{round_id})"
-        print(line, flush=True)
+        _print_run_line(line, flush=True)
 
     def _print_heartbeat(self, payload: Mapping[str, Any]) -> None:
         round_index = self._round_index(payload)
@@ -733,7 +745,7 @@ class _RunProgressPrinter:
             line += f"; last_signal_at={last_signal_at}"
         elif round_dir:
             line += f"; workspace={round_dir}"
-        print(line, flush=True)
+        _print_run_line(line, flush=True)
 
     def _print_round_finished(self, payload: Mapping[str, Any]) -> None:
         round_index = self._round_index(payload)
@@ -742,7 +754,7 @@ class _RunProgressPrinter:
         metrics = payload.get("metrics")
         if isinstance(metrics, Mapping) and metrics:
             line += f"; metrics: {self._format_metrics(metrics)}"
-        print(line, flush=True)
+        _print_run_line(line, flush=True)
 
     def _print_decision(self, payload: Mapping[str, Any]) -> None:
         action = payload.get("action", "unknown")
@@ -750,7 +762,7 @@ class _RunProgressPrinter:
         line = f"Decision: {action}"
         if reason:
             line += f" - {self._truncate(reason)}"
-        print(line, flush=True)
+        _print_run_line(line, flush=True)
 
     def _print_loop_finished(self, payload: Mapping[str, Any]) -> None:
         status = payload.get("status", "finished")
@@ -758,7 +770,7 @@ class _RunProgressPrinter:
         line = f"Run finished: {status}"
         if message:
             line += f" - {self._truncate(message)}"
-        print(line, flush=True)
+        _print_run_line(line, flush=True)
 
     def _round_label(self, round_index: int) -> str:
         if self.max_rounds is None:
@@ -1272,16 +1284,16 @@ def _format_number(value: float) -> str:
 
 
 def _print_run_result(result: Mapping[str, Any]) -> None:
-    print("Trainee run")
-    print(f"- Project: {result['project_root']}")
-    print(f"- Security: {result['security_mode']}")
-    print(f"- Data: {result['data_dir']}")
-    print(f"- Artifacts: {result['artifacts_dir']}")
+    _print_run_line("Trainee run")
+    _print_run_line(f"- Project: {result['project_root']}")
+    _print_run_line(f"- Security: {result['security_mode']}")
+    _print_run_line(f"- Data: {result['data_dir']}")
+    _print_run_line(f"- Artifacts: {result['artifacts_dir']}")
     if result["session_id"] is not None:
-        print(f"- Session: {result['session_id']}")
-    print(f"- Status: {result['status']}")
+        _print_run_line(f"- Session: {result['session_id']}")
+    _print_run_line(f"- Status: {result['status']}")
     if result["message"]:
-        print(f"- Message: {result['message']}")
+        _print_run_line(f"- Message: {result['message']}")
 
 
 def _print_tunable_discovery_result(result: Mapping[str, Any]) -> None:

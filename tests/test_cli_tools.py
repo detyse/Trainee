@@ -8,6 +8,7 @@ import yaml
 
 import trainee.cli as cli
 from trainee.cli import build_tool_manifest, call_tool, init_project, load_tool_input, main, prepare_project
+from trainee.models import EventMessage
 from trainee.provider_probe import ProviderProbeResult
 
 
@@ -330,6 +331,69 @@ fit:
     assert "fit.stages.global.max_iters" not in paths
 
 
+def test_prepare_keeps_existing_context_md(tmp_path):
+    project = tmp_path / "toymodel"
+    project.mkdir()
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    init_project(project, skip_provider_test=True)
+    context_path = project / ".trainee" / "context.md"
+    context_path.write_text("custom context\n", encoding="utf-8")
+
+    result = prepare_project(project, skip_provider_test=True)
+
+    assert context_path.read_text(encoding="utf-8") == "custom context\n"
+    assert context_path not in result["files_written"]
+    assert context_path in result["files_unchanged"]
+
+
+def test_prepare_creates_missing_context_md(tmp_path):
+    project = tmp_path / "toymodel"
+    project.mkdir()
+    (project / "train.py").write_text("print('train')\n", encoding="utf-8")
+    init_project(project, skip_provider_test=True)
+    context_path = project / ".trainee" / "context.md"
+    context_path.unlink()
+
+    result = prepare_project(project, skip_provider_test=True)
+
+    assert "# Trainee Project Context" in context_path.read_text(encoding="utf-8")
+    assert context_path in result["files_written"]
+    assert context_path not in result["files_unchanged"]
+
+
+def test_run_progress_printer_timestamps_and_throttles_heartbeat(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_run_timestamp", lambda: "2026-06-30 14:05:02+08:00")
+    times = iter([10.0, 40.0, 71.0])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+
+    printer = cli._RunProgressPrinter(max_rounds=3)
+
+    assert printer.heartbeat_interval_sec == 60.0
+    printer(
+        EventMessage(
+            event_type="heartbeat",
+            payload={"round_index": 1, "last_signal_at": "2026-06-30T06:00:00+00:00"},
+        )
+    )
+    printer(
+        EventMessage(
+            event_type="heartbeat",
+            payload={"round_index": 1, "last_signal_at": "2026-06-30T06:00:10+00:00"},
+        )
+    )
+    printer(
+        EventMessage(
+            event_type="heartbeat",
+            payload={"round_index": 1, "last_signal_at": "2026-06-30T06:01:01+00:00"},
+        )
+    )
+
+    assert capsys.readouterr().out.splitlines() == [
+        "[2026-06-30 14:05:02+08:00] Round 1/3 running; last_signal_at=2026-06-30T06:00:00+00:00",
+        "[2026-06-30 14:05:02+08:00] Round 1/3 running; last_signal_at=2026-06-30T06:01:01+00:00",
+    ]
+
+
 def test_init_command_reports_already_initialized_project(tmp_path, capsys):
     project = tmp_path / "toymodel"
     trainee_dir = project / ".trainee"
@@ -478,10 +542,13 @@ def test_run_command_executes_project_config_unsafe(tmp_path, capsys, monkeypatc
     exit_code = main(["run", str(project), "--unsafe"])
 
     output = capsys.readouterr().out
+    timestamp_prefix = r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] "
     assert exit_code == 0
     assert "Round 1/1 started" in output
     assert "Round 1/1 completed" in output
     assert "Trainee run" in output
+    assert re.search(timestamp_prefix + r"Round 1/1 started", output, re.MULTILINE)
+    assert re.search(timestamp_prefix + r"Trainee run", output, re.MULTILINE)
     assert "- Security: unsafe" in output
     assert "- Status: stopped" in output
     assert (project / ".trainee" / "runtime.sqlite3").exists()

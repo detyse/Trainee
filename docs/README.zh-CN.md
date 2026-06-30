@@ -133,7 +133,7 @@ trainee init --force
 trainee prepare
 ```
 
-`prepare` 会读取项目上下文和 baseline 配置，校验字段，并在 `.trainee/tuning.yaml` 为空时生成保守的候选可调参数。运行训练前必须人工检查生成结果。
+`prepare` 会读取项目上下文和 baseline 配置，校验字段，并在 `.trainee/tuning.yaml` 为空时生成保守的候选可调参数。它只会在 `.trainee/context.md` 缺失时创建该文件；已有 context 会保留。运行训练前必须人工检查生成结果。
 
 ## 配置文件
 
