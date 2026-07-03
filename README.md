@@ -350,6 +350,10 @@ Provider settings can also be edited in the Web UI. They are saved to:
 ~/.trainee/config.json
 ```
 
+Environment variables take precedence over values saved by the Web UI. If CLI commands still report
+`provider=none` after saving settings, check whether `TRAINEE_LLM_PROVIDER` or `LLM_PROVIDER` is set in
+that shell. The Provider Settings page and `/llm-test` show active environment overrides.
+
 The shared provider timeout defaults to `600` seconds and can be changed from Provider Settings, `llm_timeout_sec` in `config.json`, or `TRAINEE_LLM_TIMEOUT_SEC`.
 
 The shared provider temperature defaults to `1.0` and can be changed from Provider Settings, `llm_temperature` in `config.json`, or `TRAINEE_LLM_TEMPERATURE`.

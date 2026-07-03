@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import yaml
 
@@ -245,6 +246,21 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
     assert config["llm_temperature"] == 0.8
     assert config["moonshot"]["api_key"] == "moonshot-secret"
     assert client.get("/api/health").json()["llm_provider"] == "moonshot"
+
+
+def test_runtime_provider_fragment_shows_environment_override_warning(runtime_env):
+    client = runtime_env["client"]
+    runtime = client.app.state.runtime
+    updated_settings = replace(runtime.settings, environment_overrides=("TRAINEE_LLM_PROVIDER",))
+    runtime.update_settings(updated_settings)
+    client.app.state.settings = updated_settings
+
+    response = client.get("/fragments/runtime")
+
+    assert response.status_code == 200
+    assert "Environment overrides active" in response.text
+    assert "TRAINEE_LLM_PROVIDER" in response.text
+    assert str(runtime_env["config_path"]) in response.text
 
 
 def test_runtime_provider_settings_reject_negative_temperature(runtime_env):

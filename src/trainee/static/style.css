@@ -175,6 +175,15 @@ body {
   line-height: 1.45;
 }
 
+.notice.warning {
+  border-color: rgba(180, 83, 9, 0.34);
+  background: rgba(180, 83, 9, 0.1);
+}
+
+.provider-env-warning {
+  margin-bottom: 16px;
+}
+
 .stacked-form,
 .detail-block {
   display: grid;

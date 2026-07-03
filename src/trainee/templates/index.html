@@ -157,6 +157,29 @@
         });
       };
 
+      window.saveProviderAndTest = async (form) => {
+        if (form.reportValidity && !form.reportValidity()) return;
+        const outputs = document.querySelectorAll(".provider-test-output");
+        outputs.forEach((output) => {
+          output.textContent = "Saving provider settings...";
+        });
+
+        const response = await fetch(form.action, {
+          method: "POST",
+          body: new FormData(form),
+          headers: { "HX-Request": "true" },
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          outputs.forEach((output) => {
+            output.textContent = text || `Save failed with HTTP ${response.status}`;
+          });
+          return;
+        }
+        await refreshSection("#runtime-section", "/fragments/runtime");
+        await window.testProvider();
+      };
+
       window.applyPromptPreset = (select) => {
         const dataNode = document.getElementById("prompt-presets-data");
         if (!dataNode || !select.value) return;

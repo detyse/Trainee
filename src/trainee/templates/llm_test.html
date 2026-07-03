@@ -24,6 +24,18 @@
       </header>
 
       <main class="dashboard-grid">
+        {% if provider_settings.environment_overrides %}
+        <section class="panel panel-full">
+          <div class="notice warning">
+            <strong>Environment overrides active.</strong>
+            <span>
+              These variables take precedence over {{ provider_settings.global_config_path }}:
+              {{ provider_settings.environment_overrides | join(", ") }}.
+            </span>
+          </div>
+        </section>
+        {% endif %}
+
         <section class="panel panel-full">
           <div class="panel-header">
             <div>

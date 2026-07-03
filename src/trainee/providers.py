@@ -123,12 +123,17 @@ def settings_for_provider(settings: Settings, provider: LLMProvider) -> Settings
 
 
 def provider_settings_payload(settings: Settings) -> Dict[str, Any]:
+    environment_overrides = list(settings.environment_overrides)
     return {
         "llm_provider": settings.llm_provider,
+        "llm_provider_source": _llm_provider_source(environment_overrides),
         "llm_timeout_sec": settings.llm_timeout_sec,
         "llm_temperature": settings.llm_temperature,
         "agent_debug_enabled": settings.agent_debug_enabled,
         "active_model": active_model(settings),
+        "global_config_path": str(settings.global_config_path),
+        "environment_overrides": environment_overrides,
+        "environment_override_warning": _environment_override_warning(environment_overrides),
         "openai_base_url": settings.openai_base_url,
         "openai_model": settings.openai_model,
         "openai_key_configured": bool(settings.openai_api_key),
@@ -141,6 +146,19 @@ def provider_settings_payload(settings: Settings) -> Dict[str, Any]:
         "anthropic_max_tokens": settings.anthropic_max_tokens,
         "anthropic_key_configured": bool(settings.anthropic_api_key),
     }
+
+
+def _llm_provider_source(environment_overrides: list[str]) -> str:
+    if "TRAINEE_LLM_PROVIDER" in environment_overrides or "LLM_PROVIDER" in environment_overrides:
+        return "environment"
+    return "config"
+
+
+def _environment_override_warning(environment_overrides: list[str]) -> str:
+    if not environment_overrides:
+        return ""
+    names = ", ".join(environment_overrides)
+    return f"Environment variables override saved config.json settings: {names}"
 
 
 def build_provider_config_payload(update: ProviderSettingsUpdate) -> Dict[str, Any]:

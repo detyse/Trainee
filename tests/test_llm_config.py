@@ -9,6 +9,7 @@ import httpx
 from trainee.decision import DecisionEngine
 from trainee.models import MetricSpec, ProjectContext, ProjectSpec, RoundRecord, TunableParam
 from trainee.prompt_assembler import PromptAssembler
+from trainee.providers import provider_settings_payload
 from trainee.research_state import ResearchStateBuilder
 from trainee.settings import DEFAULT_LLM_TEMPERATURE, Settings, load_default_system_prompt, load_settings
 
@@ -311,6 +312,94 @@ def test_environment_overrides_home_config(tmp_path, monkeypatch):
     assert settings.openai_model == "env-model"
     assert settings.openai_api_key == "config-key"
     assert settings.llm_temperature == 0.4
+
+
+def test_provider_payload_reports_environment_overrides(tmp_path, monkeypatch):
+    for key in (
+        "TRAINEE_DATA_DIR",
+        "TRAINEE_LLM_PROVIDER",
+        "LLM_PROVIDER",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "MOONSHOT_API_KEY",
+        "MOONSHOT_BASE_URL",
+        "MOONSHOT_MODEL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_VERSION",
+        "ANTHROPIC_MAX_TOKENS",
+        "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TRAINEE_LLM_PROVIDER", "none")
+    config_path = tmp_path / "home" / ".trainee" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        jsonlib.dumps(
+            {
+                "llm_provider": "openai",
+                "openai": {"api_key": "config-openai-key", "model": "gpt-config"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(repo_root=tmp_path / "project")
+    payload = provider_settings_payload(settings)
+
+    assert settings.llm_provider == "none"
+    assert settings.environment_overrides == ("TRAINEE_LLM_PROVIDER",)
+    assert payload["llm_provider"] == "none"
+    assert payload["llm_provider_source"] == "environment"
+    assert payload["global_config_path"] == str(config_path)
+    assert payload["environment_overrides"] == ["TRAINEE_LLM_PROVIDER"]
+    assert "TRAINEE_LLM_PROVIDER" in payload["environment_override_warning"]
+
+
+def test_llm_provider_env_overrides_config_provider(tmp_path, monkeypatch):
+    for key in (
+        "TRAINEE_DATA_DIR",
+        "TRAINEE_LLM_PROVIDER",
+        "LLM_PROVIDER",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "MOONSHOT_API_KEY",
+        "MOONSHOT_BASE_URL",
+        "MOONSHOT_MODEL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_VERSION",
+        "ANTHROPIC_MAX_TOKENS",
+        "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    config_path = tmp_path / "home" / ".trainee" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        jsonlib.dumps(
+            {
+                "llm_provider": "openai",
+                "openai": {"api_key": "config-openai-key"},
+                "anthropic": {"api_key": "config-anthropic-key"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(repo_root=tmp_path / "project")
+
+    assert settings.llm_provider == "anthropic"
+    assert settings.anthropic_api_key == "config-anthropic-key"
+    assert settings.environment_overrides == ("LLM_PROVIDER",)
 
 
 def test_decision_engine_uses_moonshot_chat_completions(monkeypatch):

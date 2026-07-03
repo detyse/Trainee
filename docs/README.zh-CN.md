@@ -357,6 +357,10 @@ Provider 设置也可以在 Web UI 中编辑，并保存到：
 ~/.trainee/config.json
 ```
 
+环境变量优先级高于 Web UI 保存的配置。如果保存后 CLI 仍然报 `provider=none`，
+检查当前 shell 是否设置了 `TRAINEE_LLM_PROVIDER` 或 `LLM_PROVIDER`。Provider Settings
+页面和 `/llm-test` 会显示当前生效的环境变量覆盖项。
+
 共享 provider temperature 默认为 `1.0`，可以在 Provider Settings 中修改，也可以通过 `config.json` 的 `llm_temperature` 或 `TRAINEE_LLM_TEMPERATURE` 设置。
 
 全局 decision system prompt 也保存在同一文件中，可以通过 Web UI 或 `/api/runtime/system-prompt` 编辑。

@@ -170,6 +170,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 "provider": settings.llm_provider,
                 "model": active_model(settings),
                 "configured": provider_is_configured(settings),
+                "provider_settings": provider_settings_payload(settings),
                 "max_image_mb": MAX_LLM_TEST_IMAGE_BYTES // (1024 * 1024),
                 "image_analysis_session_id": latest_session.id if latest_session else None,
                 "image_analysis_limit": settings.max_image_analyses_per_session,

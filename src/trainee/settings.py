@@ -14,6 +14,36 @@ DEFAULT_LLM_TIMEOUT_SEC = 600.0
 DEFAULT_LLM_TEMPERATURE = 1.0
 DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION = 3
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "defaults" / "system_prompt.txt"
+PROVIDER_ENV_NAMES = (
+    "TRAINEE_LLM_PROVIDER",
+    "LLM_PROVIDER",
+    "TRAINEE_LLM_TIMEOUT_SEC",
+    "TRAINEE_LLM_TEMPERATURE",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "MOONSHOT_API_KEY",
+    "MOONSHOT_BASE_URL",
+    "MOONSHOT_MODEL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_VERSION",
+    "ANTHROPIC_MAX_TOKENS",
+)
+PROVIDER_CONFIG_KEYS = {
+    "OPENAI_API_KEY": ("openai", "api_key"),
+    "OPENAI_BASE_URL": ("openai", "base_url"),
+    "OPENAI_MODEL": ("openai", "model"),
+    "MOONSHOT_API_KEY": ("moonshot", "api_key"),
+    "MOONSHOT_BASE_URL": ("moonshot", "base_url"),
+    "MOONSHOT_MODEL": ("moonshot", "model"),
+    "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
+    "ANTHROPIC_BASE_URL": ("anthropic", "base_url"),
+    "ANTHROPIC_MODEL": ("anthropic", "model"),
+    "ANTHROPIC_VERSION": ("anthropic", "version"),
+    "ANTHROPIC_MAX_TOKENS": ("anthropic", "max_tokens"),
+}
 
 
 def load_default_system_prompt() -> str:
@@ -53,6 +83,7 @@ class Settings:
     max_image_analyses_per_session: int = DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION
     agent_debug_enabled: bool = False
     llm_temperature: float = DEFAULT_LLM_TEMPERATURE
+    environment_overrides: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def data_dir(self) -> Path:
@@ -119,6 +150,7 @@ def load_settings(
             )
         ),
         agent_debug_enabled=_config_bool(config_payload, "agent_debug_enabled", False),
+        environment_overrides=_active_provider_env_overrides(),
     )
 
 
@@ -168,11 +200,9 @@ def _write_config(config_path: Path, config: Dict[str, Any]) -> None:
 
 
 def _resolve_llm_provider(config_payload: Dict[str, Any]) -> LLMProvider:
-    requested = (
-        _settings_value("TRAINEE_LLM_PROVIDER", config_payload)
-        or _settings_value("LLM_PROVIDER", config_payload)
-        or ""
-    ).strip().lower()
+    requested = (os.getenv("TRAINEE_LLM_PROVIDER") or os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if not requested:
+        requested = str(config_payload.get("llm_provider") or "").strip().lower()
     if requested:
         if requested not in {"none", "moonshot", "openai", "anthropic"}:
             raise ValueError("TRAINEE_LLM_PROVIDER must be one of: none, moonshot, openai, anthropic")
@@ -224,23 +254,14 @@ def _config_value(name: str, config_payload: Dict[str, Any]) -> Any:
         return config_payload.get("llm_temperature")
     if name == "TRAINEE_MAX_IMAGE_ANALYSES_PER_SESSION":
         return config_payload.get("max_image_analyses_per_session")
-    provider_keys = {
-        "OPENAI_API_KEY": ("openai", "api_key"),
-        "OPENAI_BASE_URL": ("openai", "base_url"),
-        "OPENAI_MODEL": ("openai", "model"),
-        "MOONSHOT_API_KEY": ("moonshot", "api_key"),
-        "MOONSHOT_BASE_URL": ("moonshot", "base_url"),
-        "MOONSHOT_MODEL": ("moonshot", "model"),
-        "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
-        "ANTHROPIC_BASE_URL": ("anthropic", "base_url"),
-        "ANTHROPIC_MODEL": ("anthropic", "model"),
-        "ANTHROPIC_VERSION": ("anthropic", "version"),
-        "ANTHROPIC_MAX_TOKENS": ("anthropic", "max_tokens"),
-    }
-    if name in provider_keys:
-        provider, key = provider_keys[name]
+    if name in PROVIDER_CONFIG_KEYS:
+        provider, key = PROVIDER_CONFIG_KEYS[name]
         return _provider_config_value(config_payload, provider, key)
     return None
+
+
+def _active_provider_env_overrides() -> tuple[str, ...]:
+    return tuple(name for name in PROVIDER_ENV_NAMES if os.getenv(name) is not None)
 
 
 def _provider_config_value(config_payload: Dict[str, Any], provider: str, key: str) -> Any:

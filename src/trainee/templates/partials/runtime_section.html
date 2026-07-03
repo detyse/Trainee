@@ -38,12 +38,23 @@
     </div>
   </div>
 
+  {% if runtime_settings.environment_overrides %}
+  <div class="notice warning provider-env-warning">
+    <strong>Environment overrides active.</strong>
+    <span>
+      These variables take precedence over {{ runtime_settings.global_config_path }}:
+      {{ runtime_settings.environment_overrides | join(", ") }}.
+      Unset them before running CLI commands if you want Web UI settings to apply.
+    </span>
+  </div>
+  {% endif %}
+
   <div class="settings-box">
     <div>
       <p class="panel-kicker">Provider Live Test</p>
-      <p class="muted">Runtime health only checks the service and database. Use this to verify live LLM authentication.</p>
+      <p class="muted">Runtime health only checks the service and database. Use this to verify the currently saved LLM settings.</p>
     </div>
-    <button class="secondary" type="button" onclick="window.testProvider()">Test Provider</button>
+    <button class="secondary" type="button" onclick="window.testProvider()">Test Saved Provider</button>
     <pre class="agent-trace-output provider-test-output"></pre>
   </div>
 
@@ -201,6 +212,7 @@
 
     <div class="actions">
       <button class="primary" type="submit" {% if runtime_settings.loop_running %}disabled{% endif %}>Save Provider Settings</button>
+      <button class="secondary" type="button" onclick="window.saveProviderAndTest(this.form)" {% if runtime_settings.loop_running %}disabled{% endif %}>Save and Test Provider</button>
       <button class="secondary" type="button" onclick="window.runHealthCheck && window.runHealthCheck()">Run Health Check</button>
     </div>
   </form>
