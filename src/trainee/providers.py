@@ -7,6 +7,7 @@ from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
 from trainee.settings import (
+    DEFAULT_LLM_TIMEOUT_SEC,
     DEFAULT_LLM_TEMPERATURE,
     DEFAULT_MOONSHOT_BASE_URL,
     DEFAULT_MOONSHOT_MODEL,
@@ -24,7 +25,6 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-3-5-haiku-latest"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_ANTHROPIC_MAX_TOKENS = 1024
-DEFAULT_LLM_TIMEOUT_SEC = 30.0
 
 
 class OpenAIProviderUpdate(BaseModel):

@@ -350,6 +350,8 @@ Provider settings can also be edited in the Web UI. They are saved to:
 ~/.trainee/config.json
 ```
 
+The shared provider timeout defaults to `600` seconds and can be changed from Provider Settings, `llm_timeout_sec` in `config.json`, or `TRAINEE_LLM_TIMEOUT_SEC`.
+
 The shared provider temperature defaults to `1.0` and can be changed from Provider Settings, `llm_temperature` in `config.json`, or `TRAINEE_LLM_TEMPERATURE`.
 
 The global decision system prompt is stored in the same file and can be edited from the Web UI or `/api/runtime/system-prompt`.

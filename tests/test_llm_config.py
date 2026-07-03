@@ -157,7 +157,7 @@ def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
     assert settings.anthropic_base_url == "https://api.anthropic.com"
     assert settings.anthropic_model == "claude-3-5-haiku-latest"
     assert settings.anthropic_max_tokens == 1024
-    assert settings.llm_timeout_sec == 30.0
+    assert settings.llm_timeout_sec == 600.0
     assert settings.llm_temperature == DEFAULT_LLM_TEMPERATURE
 
 

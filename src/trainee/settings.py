@@ -10,6 +10,7 @@ LLMProvider = Literal["none", "moonshot", "openai", "anthropic"]
 
 DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
+DEFAULT_LLM_TIMEOUT_SEC = 600.0
 DEFAULT_LLM_TEMPERATURE = 1.0
 DEFAULT_MAX_IMAGE_ANALYSES_PER_SESSION = 3
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "defaults" / "system_prompt.txt"
@@ -94,7 +95,9 @@ def load_settings(
         static_dir=Path(__file__).resolve().parent / "static",
         global_config_path=global_config_path,
         llm_provider=_resolve_llm_provider(config_payload),
-        llm_timeout_sec=float(_settings_value("TRAINEE_LLM_TIMEOUT_SEC", config_payload, "30")),
+        llm_timeout_sec=float(
+            _settings_value("TRAINEE_LLM_TIMEOUT_SEC", config_payload, str(DEFAULT_LLM_TIMEOUT_SEC))
+        ),
         llm_temperature=float(_settings_value("TRAINEE_LLM_TEMPERATURE", config_payload, str(DEFAULT_LLM_TEMPERATURE))),
         openai_api_key=_settings_value("OPENAI_API_KEY", config_payload),
         openai_base_url=_settings_value("OPENAI_BASE_URL", config_payload, "https://api.openai.com/v1"),
