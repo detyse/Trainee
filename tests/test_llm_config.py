@@ -154,6 +154,7 @@ def test_load_settings_ignores_dotenv_file(tmp_path, monkeypatch):
     assert settings.config_path == tmp_path / ".trainee" / "config.json"
     assert settings.global_config_path == tmp_path / ".trainee" / "config.json"
     assert settings.llm_provider == "none"
+    assert settings.llm_provider_selection == "auto"
     assert settings.anthropic_api_key is None
     assert settings.anthropic_base_url == "https://api.anthropic.com"
     assert settings.anthropic_model == "claude-3-5-haiku-latest"
@@ -207,6 +208,7 @@ def test_load_settings_reads_home_config_for_provider(tmp_path, monkeypatch):
     assert settings.project_root is None
     assert settings.data_dir == tmp_path / "home" / ".trainee" / "runtime"
     assert settings.config_path == config_path
+    assert settings.llm_provider_selection == "openai"
     assert settings.llm_provider == "openai"
     assert settings.openai_api_key == "config-openai-key"
     assert settings.openai_base_url == "https://openai.example/v1"
@@ -266,10 +268,94 @@ def test_load_settings_reads_moonshot_provider(tmp_path, monkeypatch):
 
     settings = load_settings(repo_root=tmp_path)
 
+    assert settings.llm_provider_selection == "auto"
     assert settings.llm_provider == "moonshot"
     assert settings.moonshot_api_key == "test-moonshot-key"
     assert settings.moonshot_base_url == "https://moonshot.example/v1"
     assert settings.moonshot_model == "kimi-custom"
+
+
+def test_load_settings_treats_legacy_none_with_keys_as_auto(tmp_path, monkeypatch):
+    for key in (
+        "TRAINEE_DATA_DIR",
+        "TRAINEE_LLM_PROVIDER",
+        "LLM_PROVIDER",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "MOONSHOT_API_KEY",
+        "MOONSHOT_BASE_URL",
+        "MOONSHOT_MODEL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_VERSION",
+        "ANTHROPIC_MAX_TOKENS",
+        "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "home" / ".trainee" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        jsonlib.dumps(
+            {
+                "llm_provider": "none",
+                "openai": {"api_key": "test-openai-key"},
+                "moonshot": {"api_key": "test-moonshot-key"},
+                "anthropic": {"api_key": "test-anthropic-key"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(repo_root=tmp_path)
+
+    assert settings.llm_provider_selection == "auto"
+    assert settings.llm_provider == "moonshot"
+    assert settings.moonshot_api_key == "test-moonshot-key"
+
+
+def test_load_settings_keeps_schema_v2_none_disabled_with_keys(tmp_path, monkeypatch):
+    for key in (
+        "TRAINEE_DATA_DIR",
+        "TRAINEE_LLM_PROVIDER",
+        "LLM_PROVIDER",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "MOONSHOT_API_KEY",
+        "MOONSHOT_BASE_URL",
+        "MOONSHOT_MODEL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_VERSION",
+        "ANTHROPIC_MAX_TOKENS",
+        "TRAINEE_LLM_TIMEOUT_SEC",
+        "TRAINEE_LLM_TEMPERATURE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_path = tmp_path / "home" / ".trainee" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        jsonlib.dumps(
+            {
+                "llm_provider_schema": 2,
+                "llm_provider": "none",
+                "moonshot": {"api_key": "test-moonshot-key"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(repo_root=tmp_path)
+
+    assert settings.llm_provider_selection == "none"
+    assert settings.llm_provider == "none"
+    assert settings.moonshot_api_key == "test-moonshot-key"
 
 
 def test_environment_overrides_home_config(tmp_path, monkeypatch):
@@ -351,8 +437,10 @@ def test_provider_payload_reports_environment_overrides(tmp_path, monkeypatch):
     settings = load_settings(repo_root=tmp_path / "project")
     payload = provider_settings_payload(settings)
 
+    assert settings.llm_provider_selection == "none"
     assert settings.llm_provider == "none"
     assert settings.environment_overrides == ("TRAINEE_LLM_PROVIDER",)
+    assert payload["llm_provider_selection"] == "none"
     assert payload["llm_provider"] == "none"
     assert payload["llm_provider_source"] == "environment"
     assert payload["global_config_path"] == str(config_path)

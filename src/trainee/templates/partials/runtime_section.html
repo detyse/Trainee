@@ -9,7 +9,11 @@
 
   <div class="prompt-meta runtime-meta">
     <div>
-      <span class="label">Provider</span>
+      <span class="label">Provider selection</span>
+      <strong>{{ runtime_settings.llm_provider_selection }}</strong>
+    </div>
+    <div>
+      <span class="label">Active provider</span>
       <strong>{{ runtime_settings.llm_provider }}</strong>
     </div>
     <div>
@@ -94,10 +98,11 @@
       <label>
         <span>Provider</span>
         <select name="llm_provider">
-          <option value="none" {% if runtime_settings.llm_provider == "none" %}selected{% endif %}>none</option>
-          <option value="moonshot" {% if runtime_settings.llm_provider == "moonshot" %}selected{% endif %}>moonshot</option>
-          <option value="openai" {% if runtime_settings.llm_provider == "openai" %}selected{% endif %}>openai</option>
-          <option value="anthropic" {% if runtime_settings.llm_provider == "anthropic" %}selected{% endif %}>anthropic</option>
+          <option value="auto" {% if runtime_settings.llm_provider_selection == "auto" %}selected{% endif %}>auto</option>
+          <option value="moonshot" {% if runtime_settings.llm_provider_selection == "moonshot" %}selected{% endif %}>moonshot</option>
+          <option value="openai" {% if runtime_settings.llm_provider_selection == "openai" %}selected{% endif %}>openai</option>
+          <option value="anthropic" {% if runtime_settings.llm_provider_selection == "anthropic" %}selected{% endif %}>anthropic</option>
+          <option value="none" {% if runtime_settings.llm_provider_selection == "none" %}selected{% endif %}>disabled</option>
         </select>
       </label>
       <label>

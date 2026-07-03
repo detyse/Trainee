@@ -319,6 +319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(args.project_root),
                     replace=args.replace,
                     skip_provider_test=args.skip_provider_test,
+                    show_progress=True,
                 )
             )
         except (OSError, ValueError, RuntimeError) as exc:
@@ -586,6 +587,7 @@ async def prepare_project_async(
     *,
     replace: bool = False,
     skip_provider_test: bool = False,
+    show_progress: bool = False,
 ) -> dict[str, Any]:
     project_root = project_root.expanduser().resolve()
     config_path = project_config_path(project_root)
@@ -595,10 +597,20 @@ async def prepare_project_async(
     spec = compile_project_spec(project_root, config)
     context = ContextBuilder().build(spec)
     settings = load_settings(repo_root=project_root, project_root=project_root)
-    provider_test = None if skip_provider_test else await _require_provider_ready(project_root, settings=settings)
+    provider_test = None
+    if not skip_provider_test:
+        provider_test = await _await_prepare_step(
+            "Checking LLM provider",
+            _require_provider_ready(project_root, settings=settings),
+            show_progress=show_progress,
+        )
     output_discovery = OutputDiscoveryResult()
     if config.output is None:
-        output_discovery = await OutputDiscoveryEngine(settings).suggest(spec, context)
+        output_discovery = await _await_prepare_step(
+            "Inferring output config",
+            OutputDiscoveryEngine(settings).suggest(spec, context),
+            show_progress=show_progress,
+        )
     output_applied = False
     if config.launch.baseline_config and config.output is None and output_discovery.output is not None:
         output_conflicts = [
@@ -629,10 +641,14 @@ async def prepare_project_async(
         and (replace or not tuning_path.is_file() or not config.tuning.params)
     )
     if should_discover_tunables:
-        tunable_discovery = await TunableDiscoveryEngine(settings).suggest(
-            spec,
-            context,
-            fixed_args=[*config.launch.args, *config.run.fixed_args],
+        tunable_discovery = await _await_prepare_step(
+            "Inferring tunable params",
+            TunableDiscoveryEngine(settings).suggest(
+                spec,
+                context,
+                fixed_args=[*config.launch.args, *config.run.fixed_args],
+            ),
+            show_progress=show_progress,
         )
         config, applied_tunables = apply_tunable_suggestions(
             config,
@@ -682,6 +698,56 @@ async def prepare_project_async(
 
 def prepare_project(project_root: Path, *, replace: bool = False, skip_provider_test: bool = False) -> dict[str, Any]:
     return asyncio.run(prepare_project_async(project_root, replace=replace, skip_provider_test=skip_provider_test))
+
+
+async def _await_prepare_step(label: str, awaitable: Any, *, show_progress: bool) -> Any:
+    if not show_progress:
+        return await awaitable
+
+    if not sys.stderr.isatty():
+        print(f"{label}...", file=sys.stderr, flush=True)
+        try:
+            result = await awaitable
+        except Exception:
+            print(f"{label} failed", file=sys.stderr, flush=True)
+            raise
+        print(f"{label} done", file=sys.stderr, flush=True)
+        return result
+
+    spinner = asyncio.create_task(_spin_prepare_step(label))
+    try:
+        result = await awaitable
+    except Exception:
+        await _finish_prepare_step(spinner, label, "failed")
+        raise
+    await _finish_prepare_step(spinner, label, "done")
+    return result
+
+
+async def _spin_prepare_step(label: str) -> None:
+    frames = ("-", "\\", "|", "/")
+    started_at = time.monotonic()
+    index = 0
+    while True:
+        dots = "." * ((index % 3) + 1)
+        elapsed_sec = int(time.monotonic() - started_at)
+        print(
+            f"\r{label} {frames[index % len(frames)]} {dots:<3} {elapsed_sec}s",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        index += 1
+        await asyncio.sleep(0.2)
+
+
+async def _finish_prepare_step(spinner: asyncio.Task[Any], label: str, status: str) -> None:
+    spinner.cancel()
+    try:
+        await spinner
+    except asyncio.CancelledError:
+        pass
+    print(f"\r{label} {status}{' ' * 24}", file=sys.stderr, flush=True)
 
 
 def _run_timestamp() -> str:

@@ -16,7 +16,7 @@
         </div>
         <div>
           <span class="label">Provider</span>
-          <strong>{{ runtime_settings.llm_provider }} / {{ runtime_settings.active_model }}</strong>
+          <strong>{{ runtime_settings.llm_provider_selection }} -> {{ runtime_settings.llm_provider }} / {{ runtime_settings.active_model }}</strong>
         </div>
         <div>
           <span class="label">Current round</span>
@@ -46,6 +46,19 @@
     <div class="settings-box">
       <p class="panel-kicker">Quick Actions</p>
       <div class="actions">
+        <form class="provider-select-form" method="post" action="/ui/runtime/provider/select" hx-post="/ui/runtime/provider/select" hx-target="#overview-section" hx-swap="outerHTML">
+          <label>
+            <span>Provider</span>
+            <select name="llm_provider" {% if runtime_settings.loop_running %}disabled{% endif %}>
+              <option value="auto" {% if runtime_settings.llm_provider_selection == "auto" %}selected{% endif %}>auto</option>
+              <option value="moonshot" {% if runtime_settings.llm_provider_selection == "moonshot" %}selected{% endif %}>moonshot</option>
+              <option value="openai" {% if runtime_settings.llm_provider_selection == "openai" %}selected{% endif %}>openai</option>
+              <option value="anthropic" {% if runtime_settings.llm_provider_selection == "anthropic" %}selected{% endif %}>anthropic</option>
+              <option value="none" {% if runtime_settings.llm_provider_selection == "none" %}selected{% endif %}>disabled</option>
+            </select>
+          </label>
+          <button class="secondary" type="submit" {% if runtime_settings.loop_running %}disabled{% endif %}>Set</button>
+        </form>
         <form method="post" action="/ui/loop/start" hx-post="/ui/loop/start" hx-target="#overview-section" hx-swap="outerHTML">
           <button class="primary" type="submit" {% if not spec %}disabled{% endif %}>Start Loop</button>
         </form>

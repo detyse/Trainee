@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any, Dict, Literal
 
 LLMProvider = Literal["none", "moonshot", "openai", "anthropic"]
+LLMProviderSelection = Literal["auto", "none", "moonshot", "openai", "anthropic"]
+PROVIDER_AUTO_ORDER: tuple[LLMProvider, ...] = ("moonshot", "openai", "anthropic")
+PROVIDER_CONFIG_SCHEMA_VERSION = 2
 
 DEFAULT_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_MOONSHOT_MODEL = "kimi-k2.6"
@@ -84,6 +87,7 @@ class Settings:
     agent_debug_enabled: bool = False
     llm_temperature: float = DEFAULT_LLM_TEMPERATURE
     environment_overrides: tuple[str, ...] = field(default_factory=tuple)
+    llm_provider_selection: LLMProviderSelection = "auto"
 
     @property
     def data_dir(self) -> Path:
@@ -116,6 +120,7 @@ def load_settings(
     system_prompt = _ensure_system_prompt(global_config_path, config_payload)
     database_path = project_data_dir / "runtime.sqlite3"
     artifacts_dir = project_data_dir / "artifacts"
+    llm_provider_selection, llm_provider = _resolve_llm_provider(config_payload)
     return Settings(
         repo_root=repo_root,
         project_root=project_root,
@@ -125,7 +130,7 @@ def load_settings(
         template_dir=Path(__file__).resolve().parent / "templates",
         static_dir=Path(__file__).resolve().parent / "static",
         global_config_path=global_config_path,
-        llm_provider=_resolve_llm_provider(config_payload),
+        llm_provider=llm_provider,
         llm_timeout_sec=float(
             _settings_value("TRAINEE_LLM_TIMEOUT_SEC", config_payload, str(DEFAULT_LLM_TIMEOUT_SEC))
         ),
@@ -151,6 +156,7 @@ def load_settings(
         ),
         agent_debug_enabled=_config_bool(config_payload, "agent_debug_enabled", False),
         environment_overrides=_active_provider_env_overrides(),
+        llm_provider_selection=llm_provider_selection,
     )
 
 
@@ -161,6 +167,8 @@ def save_global_config(config_path: Path, payload: Dict[str, Any]) -> None:
     for key in ("llm_provider", "llm_timeout_sec", "llm_temperature", "agent_debug_enabled", "system_prompt"):
         if key in payload:
             config[key] = payload[key]
+            if key == "llm_provider":
+                config["llm_provider_schema"] = PROVIDER_CONFIG_SCHEMA_VERSION
 
     for provider in ("openai", "moonshot", "anthropic"):
         provider_payload = payload.get(provider)
@@ -199,24 +207,51 @@ def _write_config(config_path: Path, config: Dict[str, Any]) -> None:
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _resolve_llm_provider(config_payload: Dict[str, Any]) -> LLMProvider:
-    requested = (os.getenv("TRAINEE_LLM_PROVIDER") or os.getenv("LLM_PROVIDER") or "").strip().lower()
-    if not requested:
-        requested = str(config_payload.get("llm_provider") or "").strip().lower()
-    if requested:
-        if requested not in {"none", "moonshot", "openai", "anthropic"}:
-            raise ValueError("TRAINEE_LLM_PROVIDER must be one of: none, moonshot, openai, anthropic")
-        return requested  # type: ignore[return-value]
+def _resolve_llm_provider(config_payload: Dict[str, Any]) -> tuple[LLMProviderSelection, LLMProvider]:
+    env_requested = (os.getenv("TRAINEE_LLM_PROVIDER") or os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if env_requested:
+        selection = _validate_llm_provider_selection(env_requested)
+        return selection, _active_provider_for_selection(selection, config_payload)
 
-    if _settings_value("MOONSHOT_API_KEY", config_payload):
-        return "moonshot"
-    if _settings_value("ANTHROPIC_API_KEY", config_payload) and not _settings_value("OPENAI_API_KEY", config_payload):
-        return "anthropic"
-    if _settings_value("OPENAI_API_KEY", config_payload):
-        return "openai"
-    if _settings_value("ANTHROPIC_API_KEY", config_payload):
-        return "anthropic"
-    return "none"
+    config_requested = str(config_payload.get("llm_provider") or "").strip().lower()
+    if config_requested:
+        selection = _validate_llm_provider_selection(config_requested)
+        if selection == "none" and _is_legacy_auto_provider_config(config_payload):
+            selection = "auto"
+    else:
+        selection = "auto"
+    return selection, _active_provider_for_selection(selection, config_payload)
+
+
+def _validate_llm_provider_selection(provider: str) -> LLMProviderSelection:
+    if provider not in {"auto", "none", "moonshot", "openai", "anthropic"}:
+        raise ValueError("LLM provider must be one of: auto, none, moonshot, openai, anthropic")
+    return provider  # type: ignore[return-value]
+
+
+def _active_provider_for_selection(selection: LLMProviderSelection, config_payload: Dict[str, Any]) -> LLMProvider:
+    if selection == "auto":
+        configured = _first_configured_provider(config_payload)
+        return configured or "none"
+    return selection  # type: ignore[return-value]
+
+
+def _is_legacy_auto_provider_config(config_payload: Dict[str, Any]) -> bool:
+    return config_payload.get("llm_provider_schema") != PROVIDER_CONFIG_SCHEMA_VERSION and (
+        _first_configured_provider(config_payload) is not None
+    )
+
+
+def _first_configured_provider(config_payload: Dict[str, Any]) -> LLMProvider | None:
+    key_names = {
+        "moonshot": "MOONSHOT_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }
+    for provider in PROVIDER_AUTO_ORDER:
+        if _settings_value(key_names[provider], config_payload):
+            return provider
+    return None
 
 
 def _read_config(config_path: Path) -> Dict[str, Any]:

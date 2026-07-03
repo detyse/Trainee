@@ -12,12 +12,14 @@ from trainee.settings import (
     DEFAULT_MOONSHOT_BASE_URL,
     DEFAULT_MOONSHOT_MODEL,
     LLMProvider,
+    LLMProviderSelection,
+    PROVIDER_AUTO_ORDER,
     Settings,
 )
 
-ProviderName = Literal["none", "moonshot", "openai", "anthropic"]
-PROVIDER_NAMES: tuple[ProviderName, ...] = ("none", "moonshot", "openai", "anthropic")
-PROVIDER_FALLBACK_ORDER: tuple[LLMProvider, ...] = ("moonshot", "openai", "anthropic")
+ProviderName = Literal["auto", "none", "moonshot", "openai", "anthropic"]
+PROVIDER_NAMES: tuple[ProviderName, ...] = ("auto", "none", "moonshot", "openai", "anthropic")
+PROVIDER_FALLBACK_ORDER: tuple[LLMProvider, ...] = PROVIDER_AUTO_ORDER
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
@@ -51,7 +53,7 @@ class AnthropicProviderUpdate(BaseModel):
 
 
 class ProviderSettingsUpdate(BaseModel):
-    llm_provider: str = "none"
+    llm_provider: str = "auto"
     llm_timeout_sec: float = DEFAULT_LLM_TIMEOUT_SEC
     llm_temperature: float = DEFAULT_LLM_TEMPERATURE
     openai: OpenAIProviderUpdate = Field(default_factory=OpenAIProviderUpdate)
@@ -67,10 +69,10 @@ class SystemPromptUpdate(BaseModel):
     system_prompt: str
 
 
-def normalize_provider(provider: str) -> LLMProvider:
+def normalize_provider(provider: str) -> LLMProviderSelection:
     normalized = provider.strip().lower()
     if normalized not in PROVIDER_NAMES:
-        raise ValueError("provider must be one of: none, moonshot, openai, anthropic")
+        raise ValueError("provider must be one of: auto, none, moonshot, openai, anthropic")
     return normalized  # type: ignore[return-value]
 
 
@@ -126,11 +128,13 @@ def provider_settings_payload(settings: Settings) -> Dict[str, Any]:
     environment_overrides = list(settings.environment_overrides)
     return {
         "llm_provider": settings.llm_provider,
+        "llm_provider_selection": settings.llm_provider_selection,
         "llm_provider_source": _llm_provider_source(environment_overrides),
         "llm_timeout_sec": settings.llm_timeout_sec,
         "llm_temperature": settings.llm_temperature,
         "agent_debug_enabled": settings.agent_debug_enabled,
         "active_model": active_model(settings),
+        "auto_provider_order": list(PROVIDER_FALLBACK_ORDER),
         "global_config_path": str(settings.global_config_path),
         "environment_overrides": environment_overrides,
         "environment_override_warning": _environment_override_warning(environment_overrides),

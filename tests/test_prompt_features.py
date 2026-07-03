@@ -204,6 +204,7 @@ def test_runtime_provider_settings_save_to_config_json(runtime_env):
     assert response.status_code == 200
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["llm_provider"] == "openai"
+    assert config["llm_provider_schema"] == 2
     assert config["llm_timeout_sec"] == 12.0
     assert config["llm_temperature"] == 0.7
     assert config["openai"]["api_key"] == "test-openai-key"
@@ -235,6 +236,7 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["llm_provider_selection"] == "moonshot"
     assert payload["llm_provider"] == "moonshot"
     assert payload["llm_temperature"] == 0.8
     assert payload["active_model"] == "kimi-api"
@@ -243,8 +245,109 @@ def test_runtime_provider_settings_api_manages_config_without_exposing_keys(runt
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["llm_provider"] == "moonshot"
+    assert config["llm_provider_schema"] == 2
     assert config["llm_temperature"] == 0.8
     assert config["moonshot"]["api_key"] == "moonshot-secret"
+    assert client.get("/api/health").json()["llm_provider"] == "moonshot"
+
+
+def test_runtime_provider_auto_selects_saved_key(runtime_env):
+    client = runtime_env["client"]
+    config_path = runtime_env["config_path"]
+
+    response = client.post(
+        "/api/runtime/provider",
+        json={
+            "llm_provider": "auto",
+            "moonshot": {
+                "api_key": "moonshot-secret",
+                "base_url": "https://moonshot.example/v1",
+                "model": "kimi-auto",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["llm_provider_selection"] == "auto"
+    assert payload["llm_provider"] == "moonshot"
+    assert payload["active_model"] == "kimi-auto"
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["llm_provider"] == "auto"
+    assert config["llm_provider_schema"] == 2
+    assert client.get("/api/health").json()["llm_provider"] == "moonshot"
+
+
+def test_runtime_provider_disabled_keeps_saved_keys_inactive(runtime_env):
+    client = runtime_env["client"]
+    config_path = runtime_env["config_path"]
+
+    response = client.post(
+        "/api/runtime/provider",
+        json={
+            "llm_provider": "none",
+            "moonshot": {
+                "api_key": "moonshot-secret",
+                "base_url": "https://moonshot.example/v1",
+                "model": "kimi-disabled",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["llm_provider_selection"] == "none"
+    assert payload["llm_provider"] == "none"
+    assert payload["active_model"] == "none"
+    assert payload["moonshot_key_configured"] is True
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["llm_provider"] == "none"
+    assert config["llm_provider_schema"] == 2
+    assert client.get("/api/health").json()["llm_provider"] == "none"
+
+
+def test_runtime_provider_quick_select_preserves_provider_details(runtime_env):
+    client = runtime_env["client"]
+    config_path = runtime_env["config_path"]
+
+    response = client.post(
+        "/ui/runtime/provider",
+        data={
+            "llm_provider": "openai",
+            "llm_timeout_sec": "12",
+            "llm_temperature": "0.7",
+            "openai_api_key": "test-openai-key",
+            "openai_base_url": "https://openai.example/v1",
+            "openai_model": "gpt-ui",
+            "moonshot_api_key": "test-moonshot-key",
+            "moonshot_base_url": "https://moonshot.example/v1",
+            "moonshot_model": "kimi-ui",
+            "anthropic_base_url": "https://anthropic.example",
+            "anthropic_model": "claude-ui",
+            "anthropic_version": "2023-06-01",
+            "anthropic_max_tokens": "777",
+        },
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        "/ui/runtime/provider/select",
+        data={"llm_provider": "moonshot"},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["llm_provider"] == "moonshot"
+    assert config["openai"]["api_key"] == "test-openai-key"
+    assert config["openai"]["base_url"] == "https://openai.example/v1"
+    assert config["openai"]["model"] == "gpt-ui"
+    assert config["moonshot"]["api_key"] == "test-moonshot-key"
+    assert config["moonshot"]["base_url"] == "https://moonshot.example/v1"
+    assert config["moonshot"]["model"] == "kimi-ui"
     assert client.get("/api/health").json()["llm_provider"] == "moonshot"
 
 

@@ -58,6 +58,7 @@ from trainee.providers import (
     SystemPromptUpdate,
     active_model,
     build_provider_config_payload,
+    normalize_provider,
     provider_is_configured,
     provider_settings_payload,
     provider_update_from_form,
@@ -357,6 +358,18 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return JSONResponse(provider_settings_payload(updated_settings))
 
+    @app.post("/api/runtime/provider/select")
+    async def api_select_provider(request: Request, payload: Dict[str, Any]) -> JSONResponse:
+        runtime = get_runtime(request)
+        try:
+            updated_settings = _update_active_provider(request, runtime, str(payload.get("llm_provider") or "auto"))
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return JSONResponse(provider_settings_payload(updated_settings))
+
     @app.post("/api/runtime/provider/test")
     async def api_test_provider_settings(request: Request) -> JSONResponse:
         runtime = get_runtime(request)
@@ -648,7 +661,7 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
     @app.post("/ui/runtime/provider")
     async def ui_update_provider_settings(
         request: Request,
-        llm_provider: str = Form("none"),
+        llm_provider: str = Form("auto"),
         llm_timeout_sec: float = Form(DEFAULT_LLM_TIMEOUT_SEC),
         llm_temperature: float = Form(DEFAULT_LLM_TEMPERATURE),
         openai_api_key: str = Form(""),
@@ -688,6 +701,19 @@ def build_app(settings: Optional[Settings] = None) -> FastAPI:                  
                 anthropic_max_tokens=anthropic_max_tokens,
             )
             _update_provider_settings(request, runtime, update)
+        except (OSError, ValueError) as exc:
+            status_code = 409 if runtime.loop_is_running() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return await _render_refresh_response(request, templates, runtime)
+
+    @app.post("/ui/runtime/provider/select")
+    async def ui_select_provider(
+        request: Request,
+        llm_provider: str = Form("auto"),
+    ) -> HTMLResponse:
+        runtime = get_runtime(request)
+        try:
+            _update_active_provider(request, runtime, llm_provider)
         except (OSError, ValueError) as exc:
             status_code = 409 if runtime.loop_is_running() else 400
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
@@ -737,6 +763,28 @@ def _update_provider_settings(
         raise ValueError("stop the loop before changing provider settings")
     provider_payload = build_provider_config_payload(update)
     save_global_config(runtime.settings.global_config_path, provider_payload)
+    updated_settings = load_settings(
+        repo_root=runtime.settings.repo_root,
+        data_dir=runtime.settings.data_dir,
+        project_root=runtime.settings.project_root,
+        global_config_path=runtime.settings.global_config_path,
+    )
+    request.app.state.settings = updated_settings
+    runtime.update_settings(updated_settings)
+    return updated_settings
+
+
+def _update_active_provider(
+    request: Request,
+    runtime: RuntimeService,
+    provider: str,
+) -> Settings:
+    if runtime.loop_is_running():
+        raise ValueError("stop the loop before changing provider settings")
+    save_global_config(
+        runtime.settings.global_config_path,
+        {"llm_provider": normalize_provider(provider)},
+    )
     updated_settings = load_settings(
         repo_root=runtime.settings.repo_root,
         data_dir=runtime.settings.data_dir,
