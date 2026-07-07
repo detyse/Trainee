@@ -607,7 +607,7 @@ async def prepare_project_async(
     output_discovery = OutputDiscoveryResult()
     if config.output is None:
         output_discovery = await _await_prepare_step(
-            "Inferring output config",
+            "Waiting for LLM: output config",
             OutputDiscoveryEngine(settings).suggest(spec, context),
             show_progress=show_progress,
         )
@@ -642,7 +642,7 @@ async def prepare_project_async(
     )
     if should_discover_tunables:
         tunable_discovery = await _await_prepare_step(
-            "Inferring tunable params",
+            "Waiting for LLM: tunable params",
             TunableDiscoveryEngine(settings).suggest(
                 spec,
                 context,
